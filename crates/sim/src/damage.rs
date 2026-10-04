@@ -100,6 +100,7 @@ pub(crate) fn apply_explosion_blast(world: &mut FrameWorld, tick: Tick, blast: &
     }
     if crate::voxel::active() {
         crate::voxel::push_explosion(blast.origin);
+        radius_mob_shots(blast);
     }
     let attempts = radius_player_attempts(world, blast);
     let glass = radius_glass_hits(world, blast);
@@ -391,6 +392,27 @@ pub(crate) fn apply_script_hit(world: &mut FrameWorld, tick: Tick, hit: &crate::
         commit,
     };
     crate::script::player_damage(world.ecs(), tick, &player_hit);
+}
+
+/// On a Minecraft map the world's mobs take a blast as players do: MW2's
+/// falloff from the inner to the outer damage across its radius, measured
+/// to each mob's box. Like the blast's TNT, it is not stopped by walls.
+fn radius_mob_shots(blast: &ExplosionBlast) {
+    if blast.radius <= 0.0 {
+        return;
+    }
+    for (key, mins, maxs) in crate::voxel::mob_targets() {
+        let mid: [f32; 3] = std::array::from_fn(|k| (mins[k] + maxs[k]) * 0.5);
+        let half: [f32; 3] = std::array::from_fn(|k| (maxs[k] - mins[k]) * 0.5);
+        if !blast.contains(mid) {
+            continue;
+        }
+        let dist = radius_damage_distance_to_aabb(blast.origin, mid, half);
+        let amount = radius_damage_amount(blast.inner_damage, blast.outer_damage, blast.radius, dist, 1.0);
+        if amount > 0 {
+            crate::voxel::push_mob_shot(key, amount as f32, blast.origin);
+        }
+    }
 }
 
 fn radius_player_attempts(world: &FrameWorld, blast: &ExplosionBlast) -> Vec<DamageAttempt> {
