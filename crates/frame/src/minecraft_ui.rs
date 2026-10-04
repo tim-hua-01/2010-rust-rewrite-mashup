@@ -95,6 +95,27 @@ pub struct MinecraftUi {
     /// The minimap's picture of the world and the map points of its
     /// north-west and south-east corners.
     pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,
+    /// The heartbeat sensor's contacts while the held gun carries one; `None`
+    /// when it does not.
+    pub heartbeat: Option<Vec<McBlip>>,
+}
+
+/// A heartbeat sensor contact, relative to the player in map units: `right`
+/// and `forward` along the view's yaw.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct McBlip {
+    pub right: f32,
+    pub forward: f32,
+    pub kind: McBlipKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum McBlipKind {
+    /// Monsters: zombies, skeletons, creepers, spiders, slimes, witches.
+    Hostile,
+    /// Mobs that fight back when provoked: endermen, wolves, iron golems.
+    Neutral,
+    Passive,
 }
 
 /// The player's own MW2 body, drawn standing in the inventory's character
@@ -108,3 +129,80 @@ pub struct InventoryPuppet {
     /// The aim pitch its upper body and head take, in degrees.
     pub pitch: f32,
 }
+
+/// A Minecraft-map action with keys of its own. These keys sit in a layer
+/// over the MW2 binds: on a Minecraft map a key bound here does this and not
+/// the MW2 command it may also carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum McAction {
+    Inventory,
+    Drop,
+    /// A hotbar slot, `0..MC_HOTBAR`.
+    Hotbar(u8),
+}
+
+impl McAction {
+    pub const ALL: [Self; 11] = [
+        Self::Inventory,
+        Self::Drop,
+        Self::Hotbar(0),
+        Self::Hotbar(1),
+        Self::Hotbar(2),
+        Self::Hotbar(3),
+        Self::Hotbar(4),
+        Self::Hotbar(5),
+        Self::Hotbar(6),
+        Self::Hotbar(7),
+        Self::Hotbar(8),
+    ];
+
+    /// The command name the menus and `mcbind` use (`mc_inventory`,
+    /// `mc_hotbar1`).
+    pub fn command(self) -> String {
+        match self {
+            Self::Inventory => "mc_inventory".to_owned(),
+            Self::Drop => "mc_drop".to_owned(),
+            Self::Hotbar(slot) => format!("mc_hotbar{}", slot + 1),
+        }
+    }
+
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.trim().to_ascii_lowercase();
+        Self::ALL.into_iter().find(|action| action.command() == name)
+    }
+
+    pub fn label(self) -> String {
+        match self {
+            Self::Inventory => "Inventory".to_owned(),
+            Self::Drop => "Drop Item".to_owned(),
+            Self::Hotbar(slot) => format!("Hotbar Slot {}", slot + 1),
+        }
+    }
+}
+
+/// The Minecraft actions whose keys went down this frame, from the Minecraft
+/// bind layer.
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct McKeyInput {
+    pub inventory: bool,
+    pub drop: bool,
+    pub hotbar: Option<usize>,
+}
+
+/// A console request for the Minecraft world's saves
+/// (`iw4l-artifacts/minecraft-saves/<name>`).
+#[derive(Message, Clone, Debug)]
+pub enum McWorldCommand {
+    /// Writes the world, its seed and time, and the player's place and
+    /// inventory under this name.
+    Save(String),
+    /// Loads the named save: the Minecraft map is loaded again on it.
+    Load(String),
+    /// Names the saves there are.
+    List,
+}
+
+/// A line the Minecraft world answers a `McWorldCommand` with, for the
+/// console.
+#[derive(Message, Clone, Debug)]
+pub struct McWorldReport(pub String);

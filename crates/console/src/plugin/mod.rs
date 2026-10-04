@@ -149,7 +149,11 @@ impl Plugin for ConsolePlugin {
                         (crate::frontend::route, crate::class_menu::route).chain(),
                         crate::feature_dispatch::route_capture_commands,
                         crate::feature_dispatch::route_state_dump_commands,
-                        crate::feature_dispatch::route_hitvol_commands,
+                        (
+                            crate::feature_dispatch::route_hitvol_commands,
+                            crate::feature_dispatch::route_minecraft_commands,
+                        )
+                            .chain(),
                         crate::feature_dispatch::route_debug_feature_commands,
                         crate::feature_dispatch::route_session_commands,
                         crate::feature_dispatch::resume_lifecycle_commands,
@@ -293,7 +297,11 @@ fn publish_client_action_input(
     binds: Res<KeyBinds>,
     mut scripted: ResMut<ConsoleInputState>,
     console: Res<ConsoleState>,
-    (script_menus, minecraft): (Option<Res<hud::ScriptMenus>>, Option<Res<frame::MinecraftUi>>),
+    (script_menus, minecraft, mut mc_keys): (
+        Option<Res<hud::ScriptMenus>>,
+        Option<Res<frame::MinecraftUi>>,
+        ResMut<frame::McKeyInput>,
+    ),
     mut hud_input: ResMut<frame::HudInputView>,
     settings: Res<frame::GameSettings>,
     mut out: ResMut<ClientActionInput>,
@@ -347,7 +355,23 @@ fn publish_client_action_input(
         *wheel_carry = 0.0;
     }
     let script_menu = script_menus.is_some_and(|menus| menus.captures_input());
+    let minecraft_active = minecraft.as_ref().is_some_and(|ui| ui.active);
     let inventory_open = minecraft.is_some_and(|ui| ui.active && ui.inventory_open);
+    // The Minecraft layer's keys this frame; the inventory screen still
+    // takes them (its own key closes it, number keys swap slots).
+    *mc_keys = frame::McKeyInput::default();
+    if minecraft_active && devices.focused && !console.open && !script_menu {
+        for (button, action) in binds.mc_iter() {
+            if !inputs.just_pressed(button) {
+                continue;
+            }
+            match action {
+                frame::McAction::Inventory => mc_keys.inventory = true,
+                frame::McAction::Drop => mc_keys.drop = true,
+                frame::McAction::Hotbar(slot) => mc_keys.hotbar = Some(usize::from(slot)),
+            }
+        }
+    }
     skate.input_blocked = console.open || script_menu;
     // J, or clicking both sticks in together, toggles skating.
     let sticks_clicked = pad.is_some_and(|pad| {
@@ -375,7 +399,13 @@ fn publish_client_action_input(
         .is_some_and(|ps| ps.last_weapon_hand == 1);
     let mut current = [0; input_iw4::KEY_COUNT];
     for (button, id) in binds.iter() {
-        let id = crate::binds::gameplay_binding(button, id, akimbo);
+        // On a Minecraft map a key in the Minecraft layer carries no MW2
+        // command.
+        let id = if minecraft_active && binds.mc_get(button).is_some() {
+            0
+        } else {
+            crate::binds::gameplay_binding(button, id, akimbo)
+        };
         let key_num = host_keynum(button);
         if key_num < current.len() {
             current[key_num] = id;
@@ -681,6 +711,21 @@ fn setup_console(
     if registry.resolve("unbindall").is_none() {
         registry.register(
             crate::CommandSpec::new("unbindall").usage("unbindall — clear every key bind"),
+        );
+    }
+    if registry.resolve("mcbind").is_none() {
+        registry.register(
+            crate::CommandSpec::new("mcbind")
+                .usage("mcbind [key] [action] — set or list Minecraft-map keys")
+                .arg(crate::StaticCompleter::new(BINDABLE_KEYS.iter().copied()))
+                .arg(crate::StaticCompleter::new(frame::McAction::ALL.map(frame::McAction::command))),
+        );
+    }
+    if registry.resolve("mcunbind").is_none() {
+        registry.register(
+            crate::CommandSpec::new("mcunbind")
+                .usage("mcunbind <key> — clear a Minecraft-map key")
+                .arg(crate::StaticCompleter::new(BINDABLE_KEYS.iter().copied())),
         );
     }
     if registry.resolve("binddefaults").is_none() {
@@ -1033,6 +1078,14 @@ fn handle_input_commands(
             "unbind" => {
                 for line in binds.apply_script(&format!("unbind {}", command.args.join(" "))) {
                     console.echo(line, settings.log_capacity);
+                }
+            }
+            "mcbind" | "mcunbind" => {
+                let script = format!("{} {}", command.name, command.args.join(" "));
+                for line in binds.apply_script(&script) {
+                    for line in line.lines() {
+                        console.echo(line.to_owned(), settings.log_capacity);
+                    }
                 }
             }
             "unbindall" => {

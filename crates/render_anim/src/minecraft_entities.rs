@@ -19,6 +19,7 @@ use minecraftoss_player::inventory::{Inventory, ItemStack};
 use minecraftoss_player::items::{ItemEntity, WorldItems};
 use minecraftoss_player::loot::LootBook;
 use minecraftoss_player::rng::XoroshiroRandom;
+use minecraftoss_player::Difficulty;
 use std::collections::{HashMap, HashSet};
 use minecraft_terrain::pack::PackStack;
 use minecraft_terrain::poof_particles::PoofParticles;
@@ -62,6 +63,8 @@ pub(crate) struct Entities {
     loot: Option<LootBook>,
     loot_sequences: HashMap<String, XoroshiroRandom>,
     seed: i64,
+    /// The match's difficulty (`parse_difficulty`).
+    difficulty: Difficulty,
     /// Sounds the mob world made since the last take: event, block point,
     /// volume, pitch.
     pub(crate) sounds: Vec<(String, DVec3, f32, f32)>,
@@ -96,8 +99,50 @@ pub(crate) struct PlayerView {
     pub pitch: f32,
 }
 
+/// A difficulty as Game Setup's `scr_mc_difficulty` or
+/// `IW4L_MINECRAFT_DIFFICULTY` spell it: a name (`peaceful`, `easy`,
+/// `normal`, `hard`) or its id `0`..`3`. Normal when unset.
+pub(crate) fn parse_difficulty(value: Option<&str>) -> Difficulty {
+    let Some(value) = value else {
+        return Difficulty::Normal;
+    };
+    let value = value.trim().to_ascii_lowercase();
+    let parsed = Difficulty::parse(&value).or(match value.as_str() {
+        "0" => Some(Difficulty::Peaceful),
+        "1" => Some(Difficulty::Easy),
+        "2" => Some(Difficulty::Normal),
+        "3" => Some(Difficulty::Hard),
+        _ => None,
+    });
+    parsed.unwrap_or_else(|| {
+        diag::warn!(World, "Minecraft difficulty {value:?} is not peaceful, easy, normal, hard or 0-3; using normal");
+        Difficulty::Normal
+    })
+}
+
+/// `Difficulty.getId`.
+fn difficulty_id(difficulty: Difficulty) -> i32 {
+    match difficulty {
+        Difficulty::Peaceful => 0,
+        Difficulty::Easy => 1,
+        Difficulty::Normal => 2,
+        Difficulty::Hard => 3,
+    }
+}
+
+/// `Player.hurtServer`'s difficulty scaling. Every hit the mob world hands
+/// the player is a mob's melee, arrow or blast, all of which scale.
+fn scaled_damage(damage: f32, difficulty: Difficulty) -> f32 {
+    match difficulty {
+        Difficulty::Peaceful => 0.0,
+        Difficulty::Easy => (damage / 2.0 + 1.0).min(damage),
+        Difficulty::Normal => damage,
+        Difficulty::Hard => damage * 3.0 / 2.0,
+    }
+}
+
 impl Entities {
-    pub(crate) fn new(stream: &TerrainStream, seed: i64) -> Self {
+    pub(crate) fn new(stream: &TerrainStream, seed: i64, difficulty: Difficulty) -> Self {
         let sim = ServerSim::new(stream.world_gen(), stream.states.clone(), "minecraft:overworld");
         let mut server = ServerHandle::spawn(sim);
         // Mob and block loot and the recipes (stack sizes), from the game's
@@ -142,6 +187,7 @@ impl Entities {
             loot,
             loot_sequences: HashMap::new(),
             seed,
+            difficulty,
             sounds: Vec::new(),
             random: minecraftoss_player::rng::LegacyRandom::new((seed ^ 0x1735) as u64),
         }
@@ -399,7 +445,7 @@ impl Entities {
             self.server.tick(TickInput {
                 day_ticks,
                 players: if player.alive { vec![player.feet] } else { Vec::new() },
-                difficulty: 2,
+                difficulty: difficulty_id(self.difficulty),
                 simulation_center: center,
                 simulation_distance: 8,
                 pickup: player
@@ -458,7 +504,10 @@ impl Entities {
                     PlayerHitKind::Melee { attacker, .. } => Some(attacker.to_array()),
                     _ => None,
                 };
-                hits.push(((hit.damage / HEALTH_SCALE).round() as i32, from));
+                let damage = scaled_damage(hit.damage, self.difficulty);
+                if damage > 0.0 {
+                    hits.push(((damage / HEALTH_SCALE).round() as i32, from));
+                }
             }
         }
         if ticked {
@@ -473,6 +522,27 @@ impl Entities {
     }
 
     /// Every living mob's key and box in blocks, for bullets.
+    /// Each living mob's box centre in block space, and what kind of contact
+    /// the heartbeat sensor shows it as.
+    pub(crate) fn blips(&self) -> Vec<([f64; 3], frame::McBlipKind)> {
+        self.boxes()
+            .into_iter()
+            .filter_map(|(key, b)| {
+                let kind = match decode(key)? {
+                    MobHit::Zombie(_)
+                    | MobHit::Skeleton(_)
+                    | MobHit::Creeper(_)
+                    | MobHit::Spider(_)
+                    | MobHit::Slime(_)
+                    | MobHit::Witch(_) => frame::McBlipKind::Hostile,
+                    MobHit::Enderman(_) | MobHit::Wolf(_) | MobHit::IronGolem(_) => frame::McBlipKind::Neutral,
+                    _ => frame::McBlipKind::Passive,
+                };
+                Some(([(b[0] + b[3]) * 0.5, (b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5], kind))
+            })
+            .collect()
+    }
+
     pub(crate) fn boxes(&self) -> Vec<(u64, [f64; 6])> {
         let w = &self.world;
         let mut out = Vec::new();

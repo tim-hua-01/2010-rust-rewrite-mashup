@@ -154,5 +154,133 @@ pub fn install_frontend_menus(catalog: &mut asset_game::MenuCatalog) -> Result<(
             }
         }
     }
+    install_minecraft_controls(catalog);
+    install_minecraft_difficulty(catalog);
     Ok(())
+}
+
+/// Options -> Controls -> Minecraft: the Actions page's rows rebound to the
+/// Minecraft bind layer (`frame::McAction`), with a note naming any key the
+/// layer shares with an MW2 action.
+fn install_minecraft_controls(catalog: &mut asset_game::MenuCatalog) {
+    const PAGE: &str = "pc_options_minecraft";
+    let Some(mut page) = catalog.get("pc_options_actions").cloned() else {
+        return;
+    };
+    page.name = PAGE.into();
+    let mut rows: Vec<usize> = (0..page.items.len())
+        .filter(|&i| page.items[i].item_type == 14)
+        .collect();
+    rows.sort_by(|&a, &b| page.items[a].rect.y.total_cmp(&page.items[b].rect.y));
+    let mut dropped = Vec::new();
+    let mut last_y = 0.0f32;
+    for (row, &index) in rows.iter().enumerate() {
+        let (x, y) = (page.items[index].rect.x, page.items[index].rect.y);
+        let Some(action) = frame::McAction::ALL.get(row) else {
+            dropped.push((x, y));
+            continue;
+        };
+        last_y = y;
+        page.items[index].dvar = action.command();
+        if let Some(label) = page.items.iter_mut().find(|item| {
+            item.item_type == 0 && item.rect.x == x && item.rect.y == y && !item.text_key.is_empty()
+        }) {
+            label.text_key = action.label();
+        }
+    }
+    let first_dropped = dropped.iter().map(|&(_, y)| y).fold(f32::MAX, f32::min);
+    page.items.retain(|item| {
+        let row = dropped.iter().any(|&(x, y)| item.rect.x == x && item.rect.y == y);
+        // The rule above the dropped scores row.
+        let rule = item.rect.h == 1.0 && item.rect.y >= first_dropped;
+        !row && !rule
+    });
+    let mut note = None;
+    for item in &mut page.items {
+        if item.text_key == "@MENU_ACTIONS" {
+            item.text_key = "Minecraft".into();
+            item.text_literal = true;
+        } else if note.is_none() && item.item_type == 0 && item.rect.x == 232.0 && item.rect.y == last_y {
+            note = Some(item.clone());
+        }
+    }
+    if let Some(mut note) = note {
+        note.name = "mc_bind_note".into();
+        note.text_key.clear();
+        note.text_exp = format!("op 38 s:{} op 1", hex("ui_mc_bind_note"));
+        note.rect.y = last_y + 32.0;
+        note.rect.h = 40.0;
+        note.text_align_mode = 8;
+        note.text_align_x = 4.0;
+        note.text_scale = 0.3;
+        note.static_flags = 1_048_576;
+        note.fore_color = [0.75, 0.75, 0.75, 1.0];
+        page.items.push(note);
+    }
+    catalog.menus.insert(PAGE.into(), page);
+
+    let Some(controls) = catalog.menus.get_mut("pc_options_controls") else {
+        return;
+    };
+    let Some(look) = controls.items.iter().find(|item| item.text_key == "@MENU_LOOK").cloned() else {
+        return;
+    };
+    let below = look.rect.y + 20.0;
+    for item in &mut controls.items {
+        if item.rect.x >= 216.0 && item.rect.y >= below {
+            item.rect.y += 20.0;
+        }
+    }
+    let mut link = look;
+    link.name = "minecraft_controls".into();
+    link.text_key = "Minecraft".into();
+    link.text_literal = true;
+    link.rect.y = below;
+    link.handlers.action = vec![asset_game::MenuEvent::Script(format!(
+        "play mouse_click; open {PAGE};"
+    ))];
+    controls.items.push(link);
+}
+
+/// Game Setup's MINECRAFT DIFFICULTY row: a host rule, `scr_mc_difficulty`,
+/// that the Minecraft world reads when the match installs.
+fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
+    let Some(setup) = catalog.menus.get_mut("lobby_game_setup") else {
+        return;
+    };
+    let Some(template) = setup.items.iter().find(|item| item.name == "password_setup").cloned() else {
+        return;
+    };
+    let row = template.rect.y;
+    for item in &mut setup.items {
+        if item.item_type == 1 && item.rect.x == template.rect.x && item.rect.y >= row {
+            item.rect.y += 20.0;
+        }
+    }
+    let mut label = template.clone();
+    label.name = "mc_difficulty_label".into();
+    label.item_type = 0;
+    label.text_key = "MINECRAFT DIFFICULTY".into();
+    label.text_literal = true;
+    label.dvar.clear();
+    label.handlers = Default::default();
+    label.background.clear();
+    let mut choice = template;
+    choice.name = "mc_difficulty".into();
+    choice.item_type = 12;
+    choice.dvar = "scr_mc_difficulty".into();
+    choice.choices = [("PEACEFUL", "0"), ("EASY", "1"), ("NORMAL", "2"), ("HARD", "3")]
+        .map(|(text, value)| (text.to_owned(), value.to_owned()))
+        .to_vec();
+    choice.text_key.clear();
+    choice.text_exp.clear();
+    choice.text_align_mode = 10;
+    choice.text_align_x = -8.0;
+    choice.handlers.action = vec![asset_game::MenuEvent::Script("play mouse_click;".into())];
+    setup.items.push(label);
+    setup.items.push(choice);
+}
+
+fn hex(text: &str) -> String {
+    text.bytes().map(|b| format!("{b:02x}")).collect()
 }

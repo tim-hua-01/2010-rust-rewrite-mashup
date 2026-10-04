@@ -141,6 +141,10 @@ pub(crate) fn route(
     {
         dvars.set("ui_mapname", map.clone());
     }
+    // Game Setup's Minecraft difficulty, a host rule (`scr_`) like the rest.
+    if dvars.get("scr_mc_difficulty").is_none() {
+        dvars.set("scr_mc_difficulty", "2");
+    }
     if dvars.get("ui_gametype").is_none() {
         dvars.set(
             "ui_gametype",

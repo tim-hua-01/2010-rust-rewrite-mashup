@@ -15,6 +15,8 @@ use crate::{BindButton, KeyBinds, binds::wheel_button, display_button};
 #[derive(Resource, Default)]
 pub(crate) struct PendingMenuBinding {
     id: Option<u32>,
+    /// A Minecraft-layer action being listened for instead of `id`.
+    mc: Option<frame::McAction>,
     armed: bool,
 }
 
@@ -72,6 +74,7 @@ pub(crate) fn consume_menu_binding(
     capture.consumed_input = false;
     if capture.command.is_none() {
         pending.id = None;
+        pending.mc = None;
         view.listening = None;
     }
     let wheel_direction = wheel
@@ -79,8 +82,17 @@ pub(crate) fn consume_menu_binding(
         .fold(None, |first, event| first.or_else(|| wheel_button(event.y)));
     let mut began = false;
     for intent in intents.read() {
-        if let Some(id) = input_iw4::command_id_lookup(&intent.command) {
+        if let Some(action) = frame::McAction::parse(&intent.command) {
             capture.command = Some(intent.command.clone());
+            pending.id = None;
+            pending.mc = Some(action);
+            view.listening = None;
+            view.revision = view.revision.wrapping_add(1);
+            pending.armed = false;
+            began = true;
+        } else if let Some(id) = input_iw4::command_id_lookup(&intent.command) {
+            capture.command = Some(intent.command.clone());
+            pending.mc = None;
             pending.id = Some(id);
             view.listening = Some(id);
             view.revision = view.revision.wrapping_add(1);
@@ -89,8 +101,47 @@ pub(crate) fn consume_menu_binding(
         } else {
             capture.command = None;
             pending.id = None;
+            pending.mc = None;
             view.listening = None;
         }
+    }
+    if let Some(action) = pending.mc {
+        if began || !pending.armed {
+            pending.armed = true;
+            return;
+        }
+        let pad_start = active
+            .0
+            .and_then(|entity| gamepads.get(entity).ok())
+            .is_some_and(|pad| pad.just_pressed(bevy::input::gamepad::GamepadButton::Start));
+        let finish = |capture: &mut frame::UiBindingCapture,
+                      pending: &mut PendingMenuBinding,
+                      view: &mut ui::BindingView| {
+            capture.command = None;
+            capture.consumed_input = true;
+            pending.mc = None;
+            pending.armed = false;
+            view.revision = view.revision.wrapping_add(1);
+        };
+        if keys.just_pressed(KeyCode::Escape) || pad_start {
+            finish(&mut capture, &mut pending, &mut view);
+            return;
+        }
+        let button = keys
+            .get_just_pressed()
+            .copied()
+            .map(BindButton::Key)
+            .next()
+            .or_else(|| mouse.get_just_pressed().copied().map(BindButton::Mouse).next())
+            .or(wheel_direction);
+        if let Some(button) = button {
+            // A key does one Minecraft action: rebinding takes it from any
+            // other, which then shows UNBOUND.
+            binds.mc_clear_action(action);
+            binds.mc_set(button, action);
+            finish(&mut capture, &mut pending, &mut view);
+        }
+        return;
     }
     let Some(id) = pending.id else { return };
     if began || !pending.armed {
@@ -191,7 +242,62 @@ pub(crate) fn sync_binding_view(
     for (id, command) in input_iw4::INPUT_COMMAND_NAMES.iter().enumerate().skip(1) {
         dvars.set(&format!("ui_bind_{command}"), view.chord(id as u32));
     }
+    publish_minecraft_binds(&binds, &mut dvars);
     view.revision = view.revision.wrapping_add(1);
+}
+
+/// The Minecraft page's labels, and a note naming each key that also carries
+/// an MW2 command (the Minecraft action wins on a Minecraft map).
+fn publish_minecraft_binds(binds: &KeyBinds, dvars: &mut frame::UiMenuDvars) {
+    let mut keys = std::collections::BTreeMap::<frame::McAction, Vec<String>>::new();
+    let mut shared = Vec::new();
+    for (button, action) in binds.mc_iter() {
+        keys.entry(action).or_default().push(display_button(button));
+        if let Some(command) = binds.binding_name(button) {
+            shared.push(format!("{} ({})", display_button(button), mw2_action_label(command)));
+        }
+    }
+    for action in frame::McAction::ALL {
+        let label = keys.get_mut(&action).map_or_else(
+            || "UNBOUND".to_owned(),
+            |keys| {
+                keys.sort();
+                keys.join(" OR ")
+            },
+        );
+        dvars.set(&format!("ui_bind_{}", action.command()), label);
+    }
+    shared.sort();
+    let note = if shared.is_empty() {
+        "No Minecraft key is shared with an MW2 action.".to_owned()
+    } else {
+        format!(
+            "Shared with MW2: {}. On the Minecraft map the Minecraft action wins.",
+            shared.join(", ")
+        )
+    };
+    dvars.set("ui_mc_bind_note", note);
+}
+
+fn mw2_action_label(command: &str) -> &str {
+    match command {
+        "+activate" => "Use",
+        "+melee" => "Melee",
+        "+reload" => "Reload",
+        "+frag" => "Lethal",
+        "+smoke" => "Tactical",
+        "+left" => "Turn Left",
+        "+right" => "Turn Right",
+        "+actionslot 1" => "Night Vision",
+        "+actionslot 2" => "Secondary Inventory",
+        "+actionslot 3" => "Attachment",
+        "+actionslot 4" => "Killstreak",
+        "weapnext" => "Switch Weapon",
+        "+gostand" => "Jump",
+        "+breath_sprint" => "Sprint",
+        "+scores" => "Scores",
+        other => other.trim_start_matches('+'),
+    }
 }
 
 pub(crate) fn apply_master_volume(
@@ -378,6 +484,7 @@ fn serialize_settings(settings: &frame::GameSettings, binds: &KeyBinds) -> Strin
         "unbindall".to_owned(),
     ];
     lines.extend(binds.list_lines());
+    lines.extend(binds.mc_list_lines());
     lines.push(String::new());
     lines.join("\n")
 }
@@ -389,7 +496,11 @@ fn parse_settings(source: &str, settings: &mut frame::GameSettings, binds: &mut 
         if line.is_empty() || line.starts_with("//") {
             continue;
         }
-        if line.starts_with("bind ") || line == "unbindall" {
+        if line.starts_with("bind ")
+            || line == "unbindall"
+            || line.starts_with("mcbind ")
+            || line == "mcunbindall"
+        {
             bind_script.push_str(line);
             bind_script.push('\n');
             continue;

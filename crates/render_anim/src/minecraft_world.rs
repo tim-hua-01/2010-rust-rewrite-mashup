@@ -106,6 +106,16 @@ struct StepState {
 #[derive(Default)]
 struct Runtime {
     loading: Option<mpsc::Receiver<Result<Loaded, String>>>,
+    /// The installing match's difficulty: Game Setup's `scr_mc_difficulty`,
+    /// else `IW4L_MINECRAFT_DIFFICULTY`.
+    difficulty: Option<minecraftoss_player::Difficulty>,
+    /// A save `mc_load` prepared, for the next Minecraft match to install:
+    /// its meta and the copy of its region files to play in.
+    pending_load: Option<(crate::minecraft_saves::SaveMeta, std::path::PathBuf)>,
+    /// The loading save's meta, applied once its world is in.
+    restore: Option<crate::minecraft_saves::SaveMeta>,
+    /// The player's feet in block space, as of the last frame.
+    last_feet: Option<[f64; 3]>,
     world: Option<Loaded>,
     day: DayCycle,
     environment_accumulator: f64,
@@ -204,6 +214,9 @@ pub(crate) fn register(app: &mut App) {
     );
     app.init_resource::<MinecraftWorldView>()
         .init_resource::<frame::MinecraftUi>()
+        .init_resource::<frame::McKeyInput>()
+        .add_message::<frame::McWorldCommand>()
+        .add_message::<frame::McWorldReport>()
         .init_resource::<frame::InventoryPuppet>()
         .insert_non_send(Runtime::default())
         .add_systems(
@@ -214,7 +227,7 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
-fn load(seed: i64) -> Result<Loaded, String> {
+fn load(seed: i64, world: Option<std::path::PathBuf>) -> Result<Loaded, String> {
     let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
     let paths = DataPaths::under(&root);
     let registries = Arc::new(Registries::load(&paths)?);
@@ -225,7 +238,7 @@ fn load(seed: i64) -> Result<Loaded, String> {
         seed,
         VIEW_DISTANCE,
         Dimension::Overworld,
-        None,
+        world.as_deref(),
     )
     .map_err(|e| e.to_string())?;
     let build = minecraft_terrain::mesh::build(&HandcraftedScene::default(), &packs)
@@ -314,13 +327,22 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
-    (skate, cameras, gamepads, active_pad): (
+    (skate, cameras, gamepads, active_pad, rules): (
         Res<frame::SkateMode>,
         Query<&Transform, With<render_scene::FlyCamera>>,
         Query<&bevy::input::gamepad::Gamepad>,
         Option<Res<frame::ActivePad>>,
+        Option<Res<frame::HostMatchRules>>,
+    ),
+    (mut world_commands, mut reports, mut exec): (
+        MessageReader<frame::McWorldCommand>,
+        MessageWriter<frame::McWorldReport>,
+        MessageWriter<frame::UiExecCommand>,
     ),
 ) {
+    for command in world_commands.read() {
+        world_command(&mut runtime, command, &mut reports, &mut exec);
+    }
     let pad = active_pad.and_then(|active| active.0).and_then(|entity| gamepads.get(entity).ok());
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
@@ -329,13 +351,32 @@ fn update(
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
         if assets::minecraft_map::is_minecraft(&match_.zone) {
-            let seed = seed();
-            diag::info!(World, "Minecraft world: seed {seed}");
+            let loading_save = runtime.pending_load.take();
+            let seed = loading_save.as_ref().map_or_else(seed, |(meta, _)| meta.seed);
+            let rule = rules.as_ref().and_then(|rules| {
+                rules
+                    .0
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case("scr_mc_difficulty"))
+                    .map(|(_, value)| value.clone())
+            });
+            // A loaded save keeps its own difficulty.
+            let saved = loading_save.as_ref().map(|(meta, _)| meta.difficulty.clone());
+            let difficulty = crate::minecraft_entities::parse_difficulty(
+                saved
+                    .or(rule)
+                    .or_else(|| std::env::var("IW4L_MINECRAFT_DIFFICULTY").ok())
+                    .as_deref(),
+            );
+            runtime.difficulty = Some(difficulty);
+            diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}");
+            let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
+            runtime.restore = loading_save.map(|(meta, _)| meta);
             let (send, receive) = mpsc::channel();
             let _ = std::thread::Builder::new()
                 .name("minecraft-world-load".into())
                 .spawn(move || {
-                    let _ = send.send(load(seed));
+                    let _ = send.send(load(seed, world_dir));
                 });
             runtime.loading = Some(receive);
             view.active = true;
@@ -350,7 +391,12 @@ fn update(
     {
         runtime.loading = None;
         match result {
-            Ok(world) => {
+            Ok(mut world) => {
+                // A loaded save starts the player where they were saved: the
+                // spawn below waits for that ground like any other.
+                if let Some(meta) = &runtime.restore {
+                    world.stream.player_spawn = (meta.feet[0], meta.feet[1], meta.feet[2]);
+                }
                 let (x, y, z) = world.stream.player_spawn;
                 view.origin = [x, y, z];
                 view.atlas = Some(world.atlas.clone());
@@ -358,7 +404,11 @@ fn update(
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
                 runtime.sounds = Some(crate::minecraft_sounds::Sounds::load(&world.packs));
-                runtime.entities = Some(crate::minecraft_entities::Entities::new(&world.stream, world.seed));
+                runtime.entities = Some(crate::minecraft_entities::Entities::new(
+                    &world.stream,
+                    world.seed,
+                    runtime.difficulty.unwrap_or(minecraftoss_player::Difficulty::Normal),
+                ));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
                 // dusk, 18000 midnight.
@@ -367,6 +417,16 @@ fn update(
                     .and_then(|t| t.trim().parse::<f64>().ok())
                 {
                     runtime.day.set(ticks);
+                }
+                if let Some(meta) = runtime.restore.take() {
+                    runtime.day.set(meta.day_ticks);
+                    if let Some(entities) = runtime.entities.as_mut() {
+                        let slots = &mut entities.inventory.slots;
+                        for (slot, saved) in slots.iter_mut().zip(&meta.slots) {
+                            *slot = saved.as_ref().map(crate::minecraft_saves::SavedStack::stack);
+                        }
+                        entities.selected = meta.selected.min(frame::minecraft_ui::MC_HOTBAR - 1);
+                    }
                 }
                 runtime.environment_accumulator = 0.0;
                 runtime.environment_primed = false;
@@ -417,6 +477,7 @@ fn update(
         hand,
         minimap,
         steps,
+        last_feet,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -445,6 +506,7 @@ fn update(
     }
 
     let feet = sim::voxel::to_block(origin, ps.origin);
+    *last_feet = Some(feet);
     let block = (
         feet[0].floor() as i32,
         feet[1].floor() as i32,
@@ -871,6 +933,7 @@ fn update(
         ui.weapon_request = inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
         entities.selected = selected;
         inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
+        ui.heartbeat = heartbeat_contacts(&authority.0, ps, origin, entities);
 
         if let Some(sounds) = sounds.as_mut() {
             for (event, position, volume, pitch) in std::mem::take(&mut entities.sounds) {
@@ -1103,4 +1166,101 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
         view.light_volume = None;
         view.generation += 1;
     }
+}
+
+/// `mc_save`, `mc_load` and `mc_saves` (`frame::McWorldCommand`).
+fn world_command(
+    runtime: &mut Runtime,
+    command: &frame::McWorldCommand,
+    reports: &mut MessageWriter<frame::McWorldReport>,
+    exec: &mut MessageWriter<frame::UiExecCommand>,
+) {
+    let mut report = |line: String| {
+        diag::info!(World, "Minecraft saves: {line}");
+        reports.write(frame::McWorldReport(line));
+    };
+    match command {
+        frame::McWorldCommand::List => {
+            let names = crate::minecraft_saves::list();
+            report(if names.is_empty() {
+                "no Minecraft saves yet (mc_save <name>)".to_owned()
+            } else {
+                format!("Minecraft saves: {}", names.join(", "))
+            });
+        }
+        frame::McWorldCommand::Save(name) => {
+            let (Some(world), Some(entities), Some(feet)) =
+                (runtime.world.as_mut(), runtime.entities.as_ref(), runtime.last_feet)
+            else {
+                report("mc_save: no Minecraft world is in play".to_owned());
+                return;
+            };
+            world.stream.save_all();
+            let mut meta = crate::minecraft_saves::SaveMeta::new(
+                world.seed,
+                runtime.day.ticks,
+                runtime.difficulty.unwrap_or(minecraftoss_player::Difficulty::Normal),
+                feet,
+            );
+            meta.selected = entities.selected;
+            meta.slots = entities
+                .inventory
+                .slots
+                .iter()
+                .map(|slot| slot.as_ref().map(crate::minecraft_saves::SavedStack::of))
+                .collect();
+            match crate::minecraft_saves::write(name, world.stream.world_dir(), &meta) {
+                Ok(regions) => report(format!(
+                    "saved `{name}` (seed {}, {regions} region files) in {}",
+                    world.seed,
+                    crate::minecraft_saves::saves_dir().join(name).display()
+                )),
+                Err(error) => report(format!("mc_save: {error}")),
+            }
+        }
+        frame::McWorldCommand::Load(name) => match crate::minecraft_saves::prepare_load(name) {
+            Ok(save) => {
+                report(format!("loading `{name}` (seed {})", save.0.seed));
+                runtime.pending_load = Some(save);
+                exec.write(frame::UiExecCommand {
+                    text: format!("map {}", assets::minecraft_map::ZONE),
+                });
+            }
+            Err(error) => report(format!("mc_load: {error}")),
+        },
+    }
+}
+
+/// How far the heartbeat sensor reaches, in map units (MW2's sensor shows
+/// about this much ahead).
+const HEARTBEAT_RANGE: f32 = 1500.0;
+
+/// The mobs within the heartbeat sensor's reach while the held gun carries
+/// one (a `_heartbeat` weapon), placed relative to the player's view.
+fn heartbeat_contacts(
+    sim: &sim::SimWorld,
+    ps: &playerstate_iw4::PlayerState,
+    origin: [f64; 3],
+    entities: &crate::minecraft_entities::Entities,
+) -> Option<Vec<frame::McBlip>> {
+    let names = sim.weapon_script_names();
+    let held = names.get(usize::try_from(ps.weapon).ok()?)?;
+    if !held.contains("heartbeat") {
+        return None;
+    }
+    let (sin, cos) = ps.viewangles[1].to_radians().sin_cos();
+    Some(
+        entities
+            .blips()
+            .into_iter()
+            .filter_map(|(centre, kind)| {
+                let at = sim::voxel::to_map(origin, centre);
+                let (dx, dy) = (at[0] - ps.origin[0], at[1] - ps.origin[1]);
+                // MW2 yaw: 0 along +X, increasing to the left (+Y).
+                let forward = dx * cos + dy * sin;
+                let right = dx * sin - dy * cos;
+                (forward.hypot(right) <= HEARTBEAT_RANGE).then_some(frame::McBlip { right, forward, kind })
+            })
+            .collect(),
+    )
 }

@@ -316,13 +316,24 @@ impl<'a> BindInputs<'a> {
 #[derive(Resource, Debug, Clone, Default)]
 pub struct KeyBinds {
     map: HashMap<BindButton, u32>,
+    /// The Minecraft layer (`frame::McAction`): on a Minecraft map these keys
+    /// do their Minecraft action instead of any MW2 command they carry.
+    mc: HashMap<BindButton, frame::McAction>,
 }
+
+/// The Minecraft layer's default keys, as vanilla lays them out.
+const DEFAULT_MC_CONTROLS: &str = "mcbind E mc_inventory; mcbind Q mc_drop; \
+    mcbind 1 mc_hotbar1; mcbind 2 mc_hotbar2; mcbind 3 mc_hotbar3; mcbind 4 mc_hotbar4; \
+    mcbind 5 mc_hotbar5; mcbind 6 mc_hotbar6; mcbind 7 mc_hotbar7; mcbind 8 mc_hotbar8; \
+    mcbind 9 mc_hotbar9";
 
 impl KeyBinds {
     pub fn apply_defaults(&mut self) {
         self.map.clear();
         let _ = self.apply_script(DEFAULT_CONTROLS);
         self.apply_pad_layout(0);
+        self.mc.clear();
+        let _ = self.apply_script(DEFAULT_MC_CONTROLS);
     }
 
     pub fn apply_script(&mut self, script: &str) -> Vec<String> {
@@ -360,6 +371,22 @@ impl KeyBinds {
                     self.map.clear();
                     if echo_success {
                         output.push("unbindall".into());
+                    }
+                }
+                "mcbind" => match self.cmd_mcbind(&command.args) {
+                    Ok(Some(msg)) if echo_success => output.push(msg),
+                    Ok(_) => {}
+                    Err(msg) => output.push(msg),
+                },
+                "mcunbind" => match self.cmd_mcunbind(&command.args) {
+                    Ok(Some(msg)) if echo_success => output.push(msg),
+                    Ok(_) => {}
+                    Err(msg) => output.push(msg),
+                },
+                "mcunbindall" => {
+                    self.mc.clear();
+                    if echo_success {
+                        output.push("mcunbindall".into());
                     }
                 }
                 other => output.push(format!("unknown bind-script command `{other}`")),
@@ -460,6 +487,73 @@ impl KeyBinds {
                 Ok(Some(format!("bind {key} {name}")))
             }
         }
+    }
+
+    /// The key a Minecraft action is bound to this layer, keyboard and mouse
+    /// only (the controller keeps its fixed Minecraft buttons).
+    pub fn mc_set(&mut self, button: BindButton, action: frame::McAction) {
+        self.mc.insert(button, action);
+    }
+
+    pub fn mc_get(&self, button: BindButton) -> Option<frame::McAction> {
+        self.mc.get(&button).copied()
+    }
+
+    pub fn mc_clear_action(&mut self, action: frame::McAction) -> bool {
+        let before = self.mc.len();
+        self.mc.retain(|_, bound| *bound != action);
+        self.mc.len() != before
+    }
+
+    pub fn mc_iter(&self) -> impl Iterator<Item = (BindButton, frame::McAction)> + '_ {
+        self.mc.iter().map(|(b, action)| (*b, *action))
+    }
+
+    /// The layer as a script: `mcunbindall`, then one `mcbind` per key, so a
+    /// saved layer replaces the defaults rather than adding to them.
+    pub fn mc_list_lines(&self) -> Vec<String> {
+        let mut lines: Vec<String> = self
+            .mc
+            .iter()
+            .map(|(button, action)| format!("mcbind {} {}", display_button(*button), action.command()))
+            .collect();
+        lines.sort();
+        lines.dedup();
+        lines.insert(0, "mcunbindall".to_owned());
+        lines
+    }
+
+    fn cmd_mcbind(&mut self, args: &[String]) -> Result<Option<String>, String> {
+        match args {
+            [] => Ok(Some(self.mc_list_lines()[1..].join("\n"))),
+            [key, action] => {
+                let action = frame::McAction::parse(action).ok_or_else(|| {
+                    format!("unknown Minecraft action `{action}` (mc_inventory, mc_drop, mc_hotbar1-9)")
+                })?;
+                let buttons =
+                    parse_button_name(key).ok_or_else(|| format!("unknown key `{key}`"))?;
+                if buttons.iter().any(|button| button.is_pad()) {
+                    return Err("Minecraft keys are keyboard and mouse only".into());
+                }
+                for button in buttons {
+                    self.mc_set(button, action);
+                }
+                Ok(Some(format!("mcbind {key} {}", action.command())))
+            }
+            _ => Err("usage: mcbind <key> <mc_inventory|mc_drop|mc_hotbar1-9>".into()),
+        }
+    }
+
+    fn cmd_mcunbind(&mut self, args: &[String]) -> Result<Option<String>, String> {
+        let [key] = args else {
+            return Err("usage: mcunbind <key>".into());
+        };
+        let buttons = parse_button_name(key).ok_or_else(|| format!("unknown key `{key}`"))?;
+        let mut any = false;
+        for button in buttons {
+            any |= self.mc.remove(&button).is_some();
+        }
+        Ok(Some(if any { format!("mcunbind {key}") } else { format!("`{key}` has no Minecraft bind") }))
     }
 
     fn cmd_unbind(&mut self, args: &[String]) -> Result<Option<String>, String> {

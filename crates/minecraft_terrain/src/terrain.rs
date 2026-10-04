@@ -906,6 +906,9 @@ pub struct TerrainStream {
     /// Where the player first appears, within the respawn radius of it.
     pub player_spawn: (f64, f64, f64),
     server: ChunkMap,
+    /// The directory whose region files chunks load from and save to: the
+    /// world passed in, else the session directory.
+    world_dir: std::path::PathBuf,
     /// Dropped after `server`, whose drop saves into it.
     _session: Option<SessionDir>,
     sections: Sections,
@@ -1074,6 +1077,7 @@ impl TerrainStream {
             player_spawn,
             sections: Sections::new(server.view_distance(), min_section, max_section),
             server,
+            world_dir: world_path.to_path_buf(),
             _session: session,
             work,
             done,
@@ -1120,6 +1124,27 @@ impl TerrainStream {
         self.removed.clear();
         self.work.0.lock().expect("terrain work queue").compile.retain(|_, _| false);
         true
+    }
+
+    /// Where the region files are (`world_dir`).
+    pub fn world_dir(&self) -> &Path {
+        &self.world_dir
+    }
+
+    /// Writes every chunk in memory, edits included, to the region files.
+    pub fn save_all(&mut self) {
+        self.server.save_all();
+    }
+
+    /// Generates (or loads) the chunks within `radius` of a block column on
+    /// this thread, as the spawn search does before any player is tracking.
+    pub fn load_around(&mut self, (x, z): (f64, f64), radius: i32) {
+        let (cx, cz) = ((x.floor() as i32) >> 4, (z.floor() as i32) >> 4);
+        for dx in -radius..=radius {
+            for dz in -radius..=radius {
+                self.server.load_now(minecraftoss_core::ChunkPos { x: cx + dx, z: cz + dz });
+            }
+        }
     }
 
     /// `PlayerSpawnFinder.findSpawn` again, for a respawn.

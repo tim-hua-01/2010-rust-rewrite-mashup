@@ -13,6 +13,7 @@ use crate::{ConsoleCommand, ConsoleDispatch, ConsoleLine, ConsoleSettings, Conso
 mod capture;
 mod echo;
 mod hitvol;
+mod minecraft;
 mod process;
 mod replay;
 mod session;
@@ -22,6 +23,7 @@ mod ui;
 pub(crate) use capture::route_capture_commands;
 pub(crate) use echo::ConsoleEcho;
 pub(crate) use hitvol::route_hitvol_commands;
+pub(crate) use minecraft::route_minecraft_commands;
 pub(crate) use process::exit_process;
 pub(crate) use replay::route_replay_commands;
 pub(crate) use session::route_session_commands;
@@ -236,6 +238,12 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
             "togglemenu — open the script main menu (g_scriptMainMenu), or escape the top menu",
         ),
         ("openmenu", "openmenu <menu> — open an in-game menuDef"),
+        (
+            "mc_save",
+            "mc_save <name> — save the Minecraft world: its blocks, time of day, your place and inventory",
+        ),
+        ("mc_load", "mc_load <name> — load a Minecraft save (loads the Minecraft map again)"),
+        ("mc_saves", "mc_saves — list the Minecraft saves"),
         (
             "menutext",
             "menutext <text> — type into the active native menu field",
