@@ -54,6 +54,27 @@ pub enum ReliableRow {
         request_id: ActionRequestId,
         verdict: ActionVerdict,
     },
+
+    /// A piece of one Minecraft arena chunk (`frame::McTerrainSource`).
+    McChunk {
+        generation: u32,
+        pos: [i32; 2],
+        part: u16,
+        parts: u16,
+        data: std::sync::Arc<[u8]>,
+    },
+}
+
+impl ReliableRow {
+    /// About how many bytes the row encodes to, to keep control packets
+    /// under the relay's frame limit.
+    pub fn encoded_size_hint(&self) -> usize {
+        match self {
+            Self::McChunk { data, .. } => data.len() + 24,
+            Self::Failure(text) | Self::Scores(text) => text.len() + 8,
+            _ => 256,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -155,6 +176,9 @@ impl ReliablePayload {
 
 const ROW_TAG_EVENT: u8 = 0;
 const ROW_TAG_OUTCOME: u8 = 1;
+const ROW_TAG_MC_CHUNK: u8 = 10;
+/// The most bytes one `McChunk` row carries.
+pub const MAX_MC_CHUNK_PART: usize = 10 * 1024;
 
 pub fn encode_reliable_payload(
     out: &mut WireWriter,
@@ -204,6 +228,16 @@ pub fn encode_reliable_payload(
                 out.put_u8(ROW_TAG_EVENT);
                 encode_event(out, event);
             }
+            ReliableRow::McChunk { generation, pos, part, parts, data } => {
+                out.put_u8(ROW_TAG_MC_CHUNK);
+                out.put_u32(*generation);
+                out.put_i32(pos[0]);
+                out.put_i32(pos[1]);
+                out.put_u16(*part);
+                out.put_u16(*parts);
+                out.put_u32(data.len() as u32);
+                out.put_bytes(data);
+            }
             ReliableRow::ActionOutcome {
                 request_id,
                 verdict,
@@ -225,6 +259,19 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
             ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
+            ROW_TAG_MC_CHUNK => {
+                let generation = input.get_u32()?;
+                let pos = [input.get_i32()?, input.get_i32()?];
+                let part = input.get_u16()?;
+                let parts = input.get_u16()?;
+                let len = input.get_u32()? as usize;
+                if len > MAX_MC_CHUNK_PART {
+                    return Err(WireError::Malformed("McChunk part too large"));
+                }
+                let mut data = vec![0u8; len];
+                input.get_bytes(&mut data)?;
+                ReliableRow::McChunk { generation, pos, part, parts, data: data.into() }
+            }
             ROW_TAG_OUTCOME => {
                 let request_id = input.get_u32()?;
                 let verdict = ActionVerdict::from_tag(input.get_u8()?)

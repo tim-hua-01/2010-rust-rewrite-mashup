@@ -38,6 +38,6 @@ pub mod skate;
 pub use skate::SkateMode;
 pub mod minecraft_ui;
 pub use minecraft_ui::{
-    InventoryPuppet, McAction, McClick, McKeyInput, McSlot, McStack, McWorldCommand, McWorldReport,
-    MinecraftUi,
+    InventoryPuppet, McAction, McChunkPart, McClick, McKeyInput, McSlot, McStack, McTerrainSource,
+    McWorldCommand, McWorldReport, MinecraftUi,
 };

@@ -227,25 +227,37 @@ impl PeerReplicationState {
         if payload.rows.is_empty() && payload.dropped_oldest == self.control_drops_sent {
             return Ok(());
         }
-        let last = payload
-            .rows
-            .last()
-            .map(|(seq, _)| *seq)
-            .or(self.last_control_seq);
+        // Each control packet must fit the relay's frame; large rows (terrain
+        // chunks) go out as several packets in sequence order.
+        const PACKET_BUDGET: usize = 12 * 1024;
         let dropped = payload.dropped_oldest;
-        let packet = ServerPacket::Control {
-            header: PacketHeader {
-                connection,
-                sequence: 0,
-                ack: 0,
-                epoch,
-            },
-            payload,
-        };
-        mailbox
-            .push_control_outbound(member, packet.to_bytes())
-            .map_err(relay_send_error)?;
-        self.last_control_seq = last;
+        let mut groups: Vec<Vec<(u16, crate::ReliableRow)>> = vec![Vec::new()];
+        let mut size = 0;
+        for row in payload.rows.drain(..) {
+            let hint = row.1.encoded_size_hint();
+            if size + hint > PACKET_BUDGET && !groups.last().is_some_and(Vec::is_empty) {
+                groups.push(Vec::new());
+                size = 0;
+            }
+            size += hint;
+            groups.last_mut().expect("a group").push(row);
+        }
+        for rows in groups {
+            let last = rows.last().map(|(seq, _)| *seq).or(self.last_control_seq);
+            let packet = ServerPacket::Control {
+                header: PacketHeader {
+                    connection,
+                    sequence: 0,
+                    ack: 0,
+                    epoch,
+                },
+                payload: crate::ReliablePayload { ack_through: payload.ack_through, rows, dropped_oldest: dropped },
+            };
+            mailbox
+                .push_control_outbound(member, packet.to_bytes())
+                .map_err(relay_send_error)?;
+            self.last_control_seq = last;
+        }
         self.control_drops_sent = dropped;
         Ok(())
     }
@@ -333,6 +345,14 @@ impl UdpAuthorityHub {
 
     pub fn take_committed_admissions(&mut self) -> Vec<CommittedAdmission> {
         std::mem::take(&mut self.committed_admissions)
+    }
+
+    /// The clients behind this hub's relay peers (remote players, not bots).
+    pub fn peer_clients(&self) -> Vec<ClientId> {
+        self.peers
+            .keys()
+            .filter_map(|conn| self.connections.client_of(*conn).map(ClientId))
+            .collect()
     }
 
     pub fn client_of_member(&self, member_id: master_protocol::MemberId) -> Option<ClientId> {

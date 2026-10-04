@@ -620,3 +620,18 @@ not hold. Peers would walk on different blocks (collision disagreement).
    Minecraft is itself generation-order dependent.
 
 The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
+
+## Progress
+
+* **Phase 1 done (2026-10-04)** with option 1 above: the host sends the arena's
+  terrain. Host encodes each arena chunk (region-file NBT, zlib, ~8.6 KB) into
+  `frame::McTerrainSource`, nearest the spawn first; `net` streams them as
+  `ReliableRow::McChunk` pieces (≤ 10 KB, 8 per tick per client, at most 32
+  outstanding rows), control packets split under the relay limit; protocol 95.
+  A client holds the arena (`TerrainStream::set_held_area`): arena columns show
+  only the host's chunk, solid to collision until it arrives; it spawns once
+  the spawn chunk and its neighbours are in. Duo verified: the client's spawn
+  chunk checksum matches the host's, it spawns, and its walk ends at the same
+  authoritative position on both sides; the border stops players; Game Setup
+  shows difficulty, border and mobs rows. Remote players still spawn at the
+  stand-in map's spawn points (Phase 4 replaces them).

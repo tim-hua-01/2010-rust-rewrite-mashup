@@ -1151,6 +1151,9 @@ pub fn register_listen_runtime(app: &mut App) {
                 gather_authority_input.in_set(AuthoritySet::Gather),
                 step_authority.in_set(AuthoritySet::Step),
                 publish_server_tick.in_set(AuthoritySet::Snapshot),
+                crate::authority::minecraft_terrain::fanout_minecraft_terrain
+                    .in_set(AuthoritySet::Fanout)
+                    .before(fanout_loopback),
                 fanout_loopback.in_set(AuthoritySet::Fanout),
                 apply_connection_faults
                     .in_set(AuthoritySet::Bookkeeping)
@@ -1173,6 +1176,9 @@ pub fn register_listen_runtime(app: &mut App) {
                 gather_authority_input.in_set(AuthoritySet::Gather),
                 step_authority.in_set(AuthoritySet::Step),
                 publish_server_tick.in_set(AuthoritySet::Snapshot),
+                crate::authority::minecraft_terrain::fanout_minecraft_terrain
+                    .in_set(AuthoritySet::Fanout)
+                    .before(fanout_loopback),
                 fanout_loopback
                     .in_set(AuthoritySet::Fanout)
                     .after(crate::client::presentation::entities::sync_authority_entities),

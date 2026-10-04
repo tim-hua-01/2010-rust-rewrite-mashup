@@ -126,6 +126,12 @@ struct Runtime {
     ready: bool,
     /// The spawn chunk's block-state checksum, once generated.
     spawn_check: Option<u64>,
+    /// On a client: the host's arena chunks arriving in pieces (generation,
+    /// pieces by column), and whole ones waiting for the world to load.
+    chunk_parts: (u32, HashMap<[i32; 2], Vec<Option<std::sync::Arc<[u8]>>>>),
+    chunks_waiting: Vec<Vec<u8>>,
+    /// On the host: the next arena chunk to encode for clients.
+    terrain_next: usize,
     /// The heart sprites (`hearts_image`), once the world's packs are in.
     hearts: Option<Handle<Image>>,
     world: Option<Loaded>,
@@ -227,6 +233,7 @@ pub(crate) fn register(app: &mut App) {
     app.init_resource::<MinecraftWorldView>()
         .init_resource::<frame::MinecraftUi>()
         .init_resource::<frame::McKeyInput>()
+        .init_resource::<frame::McTerrainSource>()
         .add_message::<frame::McWorldCommand>()
         .add_message::<frame::McWorldReport>()
         .init_resource::<frame::InventoryPuppet>()
@@ -239,7 +246,7 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
-fn load(seed: i64, world: Option<std::path::PathBuf>) -> Result<Loaded, String> {
+fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32) -> Result<Loaded, String> {
     let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
     let paths = DataPaths::under(&root);
     let registries = Arc::new(Registries::load(&paths)?);
@@ -248,7 +255,7 @@ fn load(seed: i64, world: Option<std::path::PathBuf>) -> Result<Loaded, String> 
     let stream = TerrainStream::for_dimension(
         registries.clone(),
         seed,
-        VIEW_DISTANCE,
+        view_distance,
         Dimension::Overworld,
         world.as_deref(),
     )
@@ -363,10 +370,12 @@ fn update(
         Option<Res<net::ClientPredictionState>>,
         Option<Res<net::MasterBridge>>,
     ),
-    (mut world_commands, mut reports, mut exec): (
+    (mut world_commands, mut reports, mut exec, mut chunk_parts, mut terrain): (
         MessageReader<frame::McWorldCommand>,
         MessageWriter<frame::McWorldReport>,
         MessageWriter<frame::UiExecCommand>,
+        MessageReader<frame::McChunkPart>,
+        ResMut<frame::McTerrainSource>,
     ),
 ) {
     for command in world_commands.read() {
@@ -375,12 +384,16 @@ fn update(
     let pad = active_pad.and_then(|active| active.0).and_then(|entity| gamepads.get(entity).ok());
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
+        terrain.order.clear();
+        terrain.chunks.clear();
     }
     // Until the spawn's ground is in collision (on a client, until the host's
     // settings have arrived and the world is built from them).
     ui.loading_world = view.active && !runtime.ready;
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
+        terrain.order.clear();
+        terrain.chunks.clear();
         if assets::minecraft_map::is_minecraft(&match_.zone) {
             view.active = true;
             if authority.is_none() {
@@ -432,12 +445,14 @@ fn update(
             runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, difficulty, check: None });
             diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
+            // The host keeps the whole arena loaded around its centre.
+            let view_distance = VIEW_DISTANCE.max(arena_radius(border) + 1);
             runtime.restore = loading_save.map(|(meta, _)| meta);
             let (send, receive) = mpsc::channel();
             let _ = std::thread::Builder::new()
                 .name("minecraft-world-load".into())
                 .spawn(move || {
-                    let _ = send.send(load(seed, world_dir));
+                    let _ = send.send(load(seed, world_dir, view_distance));
                 });
             runtime.loading = Some(receive);
         }
@@ -458,9 +473,37 @@ fn update(
         let _ = std::thread::Builder::new()
             .name("minecraft-world-load".into())
             .spawn(move || {
-                let _ = send.send(load(seed, None));
+                let _ = send.send(load(seed, None, VIEW_DISTANCE));
             });
         runtime.loading = Some(receive);
+    }
+
+    // A client's arena terrain from its host, whole chunks once all their
+    // pieces are in.
+    for part in chunk_parts.read() {
+        let (generation, pieces) = &mut runtime.chunk_parts;
+        if *generation != part.generation {
+            *generation = part.generation;
+            pieces.clear();
+        }
+        let slots = pieces.entry(part.pos).or_insert_with(|| vec![None; usize::from(part.parts)]);
+        if let Some(slot) = slots.get_mut(usize::from(part.part)) {
+            *slot = Some(part.data.clone());
+        }
+        if slots.iter().all(Option::is_some) {
+            let bytes: Vec<u8> = slots.iter().flatten().flat_map(|piece| piece.iter().copied()).collect();
+            pieces.remove(&part.pos);
+            runtime.chunks_waiting.push(bytes);
+        }
+    }
+    let held = &mut *runtime;
+    if let Some(world) = held.world.as_mut() {
+        for bytes in std::mem::take(&mut held.chunks_waiting) {
+            match world.stream.decode_chunk(&bytes) {
+                Ok(chunk) => world.stream.provide_chunk(std::sync::Arc::new(chunk), &mut world.scene),
+                Err(error) => diag::warn!(World, "Minecraft: a host chunk failed to decode: {error:#}"),
+            }
+        }
     }
 
     if let Some(receive) = &runtime.loading
@@ -557,6 +600,22 @@ fn update(
                         .filter(|s| s.border > 0.0)
                         .map(|s| ([view.origin[0].floor() + 0.5, view.origin[2].floor() + 0.5], s.border)),
                 );
+                // The arena's chunks: a client takes them from its host; the
+                // host encodes them for its clients, nearest the spawn first.
+                let spawn_chunk = ((view.origin[0].floor() as i32) >> 4, (view.origin[2].floor() as i32) >> 4);
+                let radius = arena_radius(runtime.settings.map_or(0.0, |s| s.border));
+                if authority.is_none() {
+                    world.stream.set_held_area(Some((spawn_chunk, radius)));
+                } else {
+                    let mut order: Vec<[i32; 2]> = (-radius..=radius)
+                        .flat_map(|x| (-radius..=radius).map(move |z| [spawn_chunk.0 + x, spawn_chunk.1 + z]))
+                        .collect();
+                    order.sort_by_key(|[x, z]| ((x - spawn_chunk.0).pow(2) + (z - spawn_chunk.1).pow(2), *x, *z));
+                    terrain.generation = terrain.generation.wrapping_add(1);
+                    terrain.order = order;
+                    terrain.chunks.clear();
+                    runtime.terrain_next = 0;
+                }
                 runtime.ready = false;
                 runtime.spawn_check = None;
                 diag::info!(
@@ -602,6 +661,7 @@ fn update(
         settings,
         ready,
         spawn_check,
+        terrain_next,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -723,7 +783,29 @@ fn update(
             None => {}
         }
     }
-    *ready = spawn_check.is_some();
+    // Ready once the spawn's ground and its neighbours are in (a client
+    // waits for its host's chunks there).
+    let was_ready = *ready;
+    *ready = spawn_check.is_some()
+        && (-1..=1).all(|x| (-1..=1).all(|z| world.scene.generated_chunk((spawn_chunk.0 + x, spawn_chunk.1 + z)).is_some()));
+    if *ready && !was_ready {
+        diag::info!(World, "Minecraft world: spawn area in, {} chunks loaded", world.scene.generated_chunks().count());
+    }
+    // The host encodes the arena for clients a few chunks a frame.
+    if authority.is_some() {
+        let started = std::time::Instant::now();
+        while let Some(&[x, z]) = terrain.order.get(*terrain_next) {
+            let Some(chunk) = world.scene.generated_chunk((x, z)) else {
+                break;
+            };
+            let bytes = world.stream.encode_chunk(chunk);
+            terrain.chunks.insert([x, z], bytes.into());
+            *terrain_next += 1;
+            if started.elapsed().as_secs_f64() > 0.004 {
+                break;
+            }
+        }
+    }
 
     // The host tells clients which world to build (`mc_*` server info).
     if let (Some(authority), Some(settings)) = (authority.as_mut(), settings.as_ref()) {
@@ -1340,6 +1422,9 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
     runtime.settings = None;
     runtime.ready = false;
     runtime.spawn_check = None;
+    runtime.chunk_parts = Default::default();
+    runtime.chunks_waiting.clear();
+    runtime.terrain_next = 0;
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();
         view.active = false;
@@ -1506,4 +1591,15 @@ fn chunk_checksum(chunk: &minecraftoss_core::Chunk) -> u64 {
         }
     }
     hash
+}
+
+/// The arena's radius in chunks around the spawn chunk: what the border
+/// encloses, with one chunk to spare; without a border, the spawn's
+/// surroundings.
+fn arena_radius(border: f64) -> i32 {
+    if border > 0.0 {
+        (border / 16.0).ceil() as i32 + 1
+    } else {
+        4
+    }
 }

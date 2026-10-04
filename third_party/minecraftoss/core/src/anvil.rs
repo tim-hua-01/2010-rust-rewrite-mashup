@@ -53,6 +53,16 @@ impl StoredChunk {
     pub fn parse(&self) -> Result<Tag, String> {
         nbt::parse(&self.decompress()?)
     }
+
+    /// The zlib-compressed body, for sending a chunk elsewhere whole.
+    pub fn zlib_body(&self) -> Option<&[u8]> {
+        (self.kind == 2).then_some(&*self.body)
+    }
+
+    /// A chunk from a zlib-compressed body (`zlib_body`).
+    pub fn from_zlib(body: &[u8]) -> Self {
+        Self { kind: 2, body: body.into() }
+    }
 }
 
 /// One region file's chunks, held in memory as their stored payloads.

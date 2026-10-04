@@ -531,7 +531,9 @@ impl VoxelWorld {
             return BORDER_SHAPE;
         }
         let Some(chunk) = self.chunks.get(&(x >> 4, z >> 4)) else {
-            return &[];
+            // Inside a border, a column not loaded yet (a client still
+            // waiting for its host's chunk) is solid rather than a hole.
+            return if self.border.is_some() { BORDER_SHAPE } else { &[] };
         };
         let ly = y - chunk.min_y;
         if ly < 0 || ly >= chunk.height {

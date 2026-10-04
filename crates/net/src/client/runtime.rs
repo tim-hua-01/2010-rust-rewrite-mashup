@@ -589,6 +589,7 @@ pub struct ReliableInbound<'w> {
     scores: ResMut<'w, crate::Scoreboard>,
     signon: ResMut<'w, crate::SignonState>,
     bridge: Option<Res<'w, crate::MasterBridge>>,
+    minecraft: MessageWriter<'w, frame::McChunkPart>,
 }
 
 impl ReliableInbound<'_> {
@@ -659,6 +660,15 @@ impl ReliableInbound<'_> {
                 crate::ReliableRow::Scores(cmd) => {
                     self.scores.parsed = crate::parse_scoreboard_cmd(cmd);
                     self.scores.cmd = Some(cmd.clone());
+                }
+                crate::ReliableRow::McChunk { generation, pos, part, parts, data } => {
+                    self.minecraft.write(frame::McChunkPart {
+                        generation: *generation,
+                        pos: *pos,
+                        part: *part,
+                        parts: *parts,
+                        data: data.clone(),
+                    });
                 }
                 crate::ReliableRow::ActionOutcome {
                     request_id,
@@ -1912,6 +1922,7 @@ pub fn register_client_runtime(app: &mut App) {
         .init_resource::<ClientReliableAck>()
         .init_resource::<GameplaySendPacer>()
         .add_message::<ReliableControlEvent>()
+        .add_message::<frame::McChunkPart>()
         .add_message::<frame::MatchInstalled>()
         .add_message::<frame::MatchTornDown>()
         .init_resource::<RemoteProxyState>()

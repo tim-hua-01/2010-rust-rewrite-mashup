@@ -53,6 +53,18 @@ fn main() -> anyhow::Result<()> {
         let sums: BTreeMap<(i32, i32), u64> =
             wanted.iter().map(|&pos| (pos, checksum(scene.generated_chunk(pos).unwrap()))).collect();
         println!("run {run}: {} chunks in {:.1}s", sums.len(), started.elapsed().as_secs_f64());
+        // The host-to-client transfer encoding must round-trip exactly.
+        let (mut bytes, mut mismatched) = (0usize, 0usize);
+        for &pos in &wanted {
+            let chunk = scene.generated_chunk(pos).unwrap();
+            let encoded = stream.encode_chunk(chunk);
+            bytes += encoded.len();
+            let decoded = stream.decode_chunk(&encoded)?;
+            if checksum(&decoded) != checksum(chunk) {
+                mismatched += 1;
+            }
+        }
+        println!("  transfer: {} KB for {} chunks ({} KB each), {mismatched} round-trip mismatches", bytes / 1024, wanted.len(), bytes / 1024 / wanted.len());
         // Every block of one chunk, to see what differs.
         let probe = scene.generated_chunk((2, -2)).unwrap();
         let mut blocks = Vec::new();

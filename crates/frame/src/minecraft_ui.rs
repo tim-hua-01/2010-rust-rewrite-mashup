@@ -193,3 +193,26 @@ pub enum McWorldCommand {
 /// console.
 #[derive(Message, Clone, Debug)]
 pub struct McWorldReport(pub String);
+
+/// The host's arena terrain for joining clients (multiplayer peers can't
+/// generate identical terrain themselves): each chunk column's encoded base
+/// state, in the order to send them, nearest the spawn first.
+#[derive(Resource, Default, Clone)]
+pub struct McTerrainSource {
+    /// Changes when the world does; a client's transfer starts over.
+    pub generation: u64,
+    /// Every arena chunk, nearest the spawn first.
+    pub order: Vec<[i32; 2]>,
+    /// The encoded chunks so far (`minecraft_terrain::terrain::encode_chunk`).
+    pub chunks: HashMap<[i32; 2], std::sync::Arc<[u8]>>,
+}
+
+/// A piece of an arena chunk from the host, as a client receives it.
+#[derive(Message, Clone, Debug)]
+pub struct McChunkPart {
+    pub generation: u32,
+    pub pos: [i32; 2],
+    pub part: u16,
+    pub parts: u16,
+    pub data: std::sync::Arc<[u8]>,
+}

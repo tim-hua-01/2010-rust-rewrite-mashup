@@ -919,6 +919,18 @@ pub struct TerrainStream {
     /// Bumped whenever a chunk must be (re)lit; stale light results drop.
     light_epochs: HashMap<ChunkPos, u64>,
     lights_pending: HashSet<ChunkPos>,
+    /// The arena (centre chunk, radius in chunks) whose chunks come only from
+    /// `provide_chunk`: a multiplayer client takes its host's terrain there,
+    /// since peers can't generate identical terrain.
+    held: Option<(ChunkPos, i32)>,
+    /// Chunks provided for the held arena, kept while the world lives.
+    provided: HashMap<ChunkPos, Arc<Chunk>>,
+    /// Held chunks the chunk map holds loaded: shown once provided.
+    tracked_held: HashSet<ChunkPos>,
+    /// Provided chunks to report loaded on the next server tick.
+    provided_loads: Vec<Arc<Chunk>>,
+    chunk_min_y: i32,
+    chunk_height: i32,
     /// Bumped whenever a section compile is scheduled; stale results drop.
     serials: HashMap<SectionPos, u64>,
     next_serial: u64,
@@ -1006,6 +1018,7 @@ impl TerrainStream {
             Dimension::End => TerrainGenerator::end(registries.clone(), seed),
         }
         .map_err(|e| anyhow!(e))?;
+        let (generator_min_y, generator_height) = (generator.chunk_min_y, generator.chunk_height);
         let mut states = BlockStates::new(registries, seed, generator.chunk_min_y, generator.chunk_height)?;
         states.sky_light = dimension != Dimension::Nether;
         let states = Arc::new(states);
@@ -1088,6 +1101,12 @@ impl TerrainStream {
             lights: HashMap::new(),
             light_epochs: HashMap::new(),
             lights_pending: HashSet::new(),
+            held: None,
+            provided: HashMap::new(),
+            tracked_held: HashSet::new(),
+            provided_loads: Vec::new(),
+            chunk_min_y: generator_min_y,
+            chunk_height: generator_height,
             serials: HashMap::new(),
             next_serial: 0,
             player_sections: HashSet::new(),
@@ -1229,45 +1248,34 @@ impl TerrainStream {
                 ChunkEvent::Center(_) => {}
                 ChunkEvent::Load(chunk) => {
                     let _span = span("chunk load (client)");
-                    loaded.push(chunk.clone());
                     let pos = (chunk.pos.x, chunk.pos.z);
-                    let empty = {
-                        let _span = span("  empty_sections");
-                        self.empty_sections(scene, &chunk)
-                    };
-                    {
-                        let _span = span("  scene.insert_chunk");
-                        scene.insert_chunk(chunk);
-                    }
-                    self.sections.chunk_loaded(pos, empty);
-                    for x in pos.0 - 1..=pos.0 + 1 {
-                        for z in pos.1 - 1..=pos.1 + 1 {
-                            if !self.lights.contains_key(&(x, z)) && !self.lights_pending.contains(&(x, z)) {
-                                self.request_light(scene, (x, z));
-                            }
+                    // In a held arena only the provided chunk is shown; until
+                    // it arrives the column stays empty (and solid to
+                    // collision, by the voxel world's rule).
+                    let chunk = if self.is_held(pos) {
+                        self.tracked_held.insert(pos);
+                        match self.provided.get(&pos) {
+                            Some(provided) => provided.clone(),
+                            None => continue,
                         }
-                    }
+                    } else {
+                        chunk
+                    };
+                    loaded.push(chunk.clone());
+                    self.show_chunk(chunk, scene);
                 }
                 ChunkEvent::Forget(pos) => {
                     let _span = span("chunk forget (client)");
                     forgotten.push(pos);
                     let pos = (pos.x, pos.z);
-                    if scene.generated_chunk(pos).is_none() {
-                        continue;
+                    self.tracked_held.remove(&pos);
+                    if self.hide_chunk(pos, scene) {
+                        cancelled.insert(pos);
                     }
-                    scene.remove_chunk(pos);
-                    self.removed.extend(self.sections.chunk_unloaded(pos));
-                    *self.light_epochs.entry(pos).or_default() += 1;
-                    self.lights_pending.remove(&pos);
-                    self.player_relights.remove(&pos);
-                    self.player_sections.retain(|s| (s.0, s.2) != pos);
-                    if self.lights.remove(&pos).is_some() {
-                        self.light_changes.push((pos, None));
-                    }
-                    cancelled.insert(pos);
                 }
             }
         }
+        loaded.append(&mut self.provided_loads);
         if !cancelled.is_empty() {
             let _span = span("  cancel queued work");
             let (lock, _) = &*self.work;
@@ -1276,6 +1284,88 @@ impl TerrainStream {
             queue.compile.retain(|section, _| !cancelled.contains(&(section.0, section.2)));
         }
         (loaded, forgotten)
+    }
+
+    /// A chunk joins the scene, its sections and lighting.
+    fn show_chunk(&mut self, chunk: Arc<Chunk>, scene: &mut HandcraftedScene) {
+        let pos = (chunk.pos.x, chunk.pos.z);
+        let empty = {
+            let _span = span("  empty_sections");
+            self.empty_sections(scene, &chunk)
+        };
+        {
+            let _span = span("  scene.insert_chunk");
+            scene.insert_chunk(chunk);
+        }
+        self.sections.chunk_loaded(pos, empty);
+        for x in pos.0 - 1..=pos.0 + 1 {
+            for z in pos.1 - 1..=pos.1 + 1 {
+                if !self.lights.contains_key(&(x, z)) && !self.lights_pending.contains(&(x, z)) {
+                    self.request_light(scene, (x, z));
+                }
+            }
+        }
+    }
+
+    /// A chunk leaves the scene, its sections and lighting; false when it
+    /// wasn't shown.
+    fn hide_chunk(&mut self, pos: ChunkPos, scene: &mut HandcraftedScene) -> bool {
+        if scene.generated_chunk(pos).is_none() {
+            return false;
+        }
+        scene.remove_chunk(pos);
+        self.removed.extend(self.sections.chunk_unloaded(pos));
+        *self.light_epochs.entry(pos).or_default() += 1;
+        self.lights_pending.remove(&pos);
+        self.player_relights.remove(&pos);
+        self.player_sections.retain(|s| (s.0, s.2) != pos);
+        if self.lights.remove(&pos).is_some() {
+            self.light_changes.push((pos, None));
+        }
+        true
+    }
+
+    /// Sets the arena whose chunks come only from `provide_chunk` (centre
+    /// chunk, radius in chunks), or none.
+    pub fn set_held_area(&mut self, held: Option<(ChunkPos, i32)>) {
+        self.held = held;
+    }
+
+    fn is_held(&self, (x, z): ChunkPos) -> bool {
+        self.held.is_some_and(|((cx, cz), radius)| (x - cx).abs() <= radius && (z - cz).abs() <= radius)
+    }
+
+    /// The host's chunk for a held column: shown now if the column is loaded
+    /// (replacing what was), else when it loads. Reported loaded by the next
+    /// `server_tick`.
+    pub fn provide_chunk(&mut self, chunk: Arc<Chunk>, scene: &mut HandcraftedScene) {
+        let pos = (chunk.pos.x, chunk.pos.z);
+        self.provided.insert(pos, chunk.clone());
+        if self.tracked_held.contains(&pos) {
+            self.hide_chunk(pos, scene);
+            self.show_chunk(chunk.clone(), scene);
+            self.provided_loads.push(chunk);
+        }
+    }
+
+    /// Whether a held column's chunk has arrived.
+    pub fn is_provided(&self, pos: ChunkPos) -> bool {
+        self.provided.contains_key(&pos)
+    }
+
+    /// A chunk's blocks, biomes and light as one compressed payload (the
+    /// region-file encoding), for sending it to a peer.
+    pub fn encode_chunk(&self, chunk: &Chunk) -> Vec<u8> {
+        let tag = minecraftoss_core::chunk_nbt::write_chunk(chunk, self.states.registries(), 0);
+        let stored = minecraftoss_core::anvil::StoredChunk::encode(&tag);
+        stored.zlib_body().expect("encode writes zlib").to_vec()
+    }
+
+    /// A chunk from `encode_chunk`'s payload.
+    pub fn decode_chunk(&self, bytes: &[u8]) -> Result<Chunk> {
+        let tag = minecraftoss_core::anvil::StoredChunk::from_zlib(bytes).parse().map_err(|e| anyhow!(e))?;
+        minecraftoss_core::chunk_nbt::read_chunk(&tag, self.states.registries(), self.chunk_min_y, self.chunk_height)
+            .map_err(|e| anyhow!(e))
     }
 
     /// Hands edited positions to the integrated server, whose chunks are
