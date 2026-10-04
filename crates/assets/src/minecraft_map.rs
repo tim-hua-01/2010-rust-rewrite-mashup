@@ -4,12 +4,39 @@
 use asset_transport::{GamesRoot, ZoneFile};
 
 pub const ZONE: &str = "minecraft:overworld";
-const PROXY_ZONE: &str = "iw4:mp_rust";
-/// The map whose level script the Minecraft world runs.
+/// The map whose level script the generated Minecraft world runs.
 pub const PROXY_MAP: &str = "mp_rust";
 
+/// The Minecraft maps: the generated world, and replicas of MW2 maps built
+/// from the map each stands on (its zone, and whether it's a replica).
+const WORLDS: [(&str, &str, bool); 3] = [
+    (ZONE, "mp_rust", false),
+    ("minecraft:rust", "mp_rust", true),
+    ("minecraft:terminal", "mp_terminal", true),
+];
+
+fn world(zone: &str) -> Option<(&'static str, &'static str, bool)> {
+    let zone = zone.trim();
+    WORLDS.into_iter().find(|(name, ..)| name.eq_ignore_ascii_case(zone))
+}
+
 pub fn is_minecraft(zone: &str) -> bool {
-    zone.eq_ignore_ascii_case(ZONE)
+    world(zone).is_some()
+}
+
+/// Whether the Minecraft map is a replica of the MW2 map it stands on.
+pub fn is_replica(zone: &str) -> bool {
+    world(zone).or_else(|| zone.split_once(':').and_then(|(_, rest)| world(rest))).is_some_and(|(.., replica)| replica)
+}
+
+/// The MW2 map a Minecraft map stands on (its weapons, bodies and level
+/// script; a replica's geometry too).
+pub fn proxy_map(zone: &str) -> &'static str {
+    world(zone).or_else(|| zone.split_once(':').and_then(|(_, rest)| world(rest))).map_or(PROXY_MAP, |(_, map, _)| map)
+}
+
+fn proxy_zone(zone: &str) -> String {
+    format!("iw4:{}", proxy_map(zone))
 }
 
 /// Whether a load's zone, with or without its content namespace, is the
@@ -52,8 +79,11 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
                 .ok_or_else(crate::minecraft_setup::status)?
         }
     };
-    let mut proxy = asset_transport::find_zone_file(root_dir, PROXY_ZONE)?;
-    proxy.zone_name = ZONE.to_owned();
+    let mut proxy = asset_transport::find_zone_file(root_dir, &proxy_zone(zone))?;
+    proxy.zone_name = world(zone)
+        .or_else(|| zone.split_once(':').and_then(|(_, rest)| world(rest)))
+        .map_or(ZONE, |(name, ..)| name)
+        .to_owned();
     proxy.alias_note = Some(format!("Minecraft world from {}", checkout.display()));
     Ok(proxy)
 }
@@ -63,11 +93,9 @@ pub fn find_zone_file(root_dir: &GamesRoot, zone: &str) -> Result<ZoneFile, Stri
 pub fn list_mp_map_packs(root_dir: &GamesRoot) -> Vec<asset_transport::MapPack> {
     prepare();
     let mut packs = asset_transport::list_mp_map_packs(root_dir);
-    if asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
-        packs.push(asset_transport::MapPack {
-            label: "Minecraft".to_owned(),
-            maps: vec![ZONE.to_owned()],
-        });
+    let maps = installed_worlds(root_dir);
+    if !maps.is_empty() {
+        packs.push(asset_transport::MapPack { label: "Minecraft".to_owned(), maps });
     }
     packs
 }
@@ -76,10 +104,17 @@ pub fn list_mp_maps(root_dir: &GamesRoot) -> Vec<String> {
     let mut maps = asset_transport::list_mp_maps(root_dir);
     // Listed before Mojang's files are in: loading it waits for them.
     prepare();
-    if asset_transport::find_zone_file(root_dir, PROXY_ZONE).is_ok() {
-        maps.push(ZONE.to_owned());
-    }
+    maps.extend(installed_worlds(root_dir));
     maps.sort();
     maps.dedup();
     maps
+}
+
+/// The Minecraft maps whose MW2 map is installed.
+fn installed_worlds(root_dir: &GamesRoot) -> Vec<String> {
+    WORLDS
+        .iter()
+        .filter(|(_, map, _)| asset_transport::find_zone_file(root_dir, &format!("iw4:{map}")).is_ok())
+        .map(|(name, ..)| (*name).to_owned())
+        .collect()
 }

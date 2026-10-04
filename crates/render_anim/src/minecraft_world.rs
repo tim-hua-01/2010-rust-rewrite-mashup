@@ -78,6 +78,8 @@ struct Loaded {
     celestial: Arc<image::RgbaImage>,
     cloud_mask: Option<CloudMask>,
     crack_texture: Arc<image::RgbaImage>,
+    /// A replica's half width in blocks, for its border.
+    replica_half_width: Option<f64>,
 }
 
 /// The hand's swing and the timers of mining and placing by hand.
@@ -258,7 +260,15 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
-fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built: Option<(WorldKind, i32)>) -> Result<Loaded, String> {
+/// An arena the host builds instead of the generated terrain.
+enum Built {
+    /// Superflat over this many chunks around the spawn.
+    Flat(i32),
+    /// The stand-in MW2 map's geometry, voxelized.
+    Replica(Arc<sim::SimContent>),
+}
+
+fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built: Option<Built>) -> Result<Loaded, String> {
     let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
     let paths = DataPaths::under(&root);
     let registries = Arc::new(Registries::load(&paths)?);
@@ -276,9 +286,36 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built:
         .map_err(|e| e.to_string())?;
     let mut scene = HandcraftedScene::streamed(stream.states.clone());
     let mut stream = stream;
-    // A built arena (flat): the host makes its chunks and shows only those,
-    // with the spawn standing on the new ground.
-    if let Some((WorldKind::Flat, radius)) = built {
+    // A built arena: the host makes its chunks and shows only those, with
+    // the spawn standing on the new ground.
+    let mut replica_half_width = None;
+    if let Some(Built::Replica(content)) = &built {
+        let (sx, sy, sz) = stream.player_spawn;
+        let origin = [sx, sy, sz];
+        let started = std::time::Instant::now();
+        let voxels = crate::minecraft_replica::voxelize(content, origin);
+        let radius = (voxels.half_width / 16.0).ceil() as i32 + 1;
+        let spawn_chunk = ((sx.floor() as i32) >> 4, (sz.floor() as i32) >> 4);
+        stream.set_held_area(Some((spawn_chunk, radius)));
+        for x in -radius..=radius {
+            for z in -radius..=radius {
+                let base = stream.generated_base((spawn_chunk.0 + x, spawn_chunk.1 + z));
+                let chunk = crate::minecraft_replica::build_chunk(&stream, &base, &voxels);
+                stream.provide_chunk(Arc::new(chunk), &mut scene);
+            }
+        }
+        diag::info!(
+            World,
+            "Minecraft replica: {} blocks, half width {:.0}, floor {}, {} chunks in {:.1}s",
+            voxels.blocks.len(),
+            voxels.half_width,
+            voxels.floor,
+            (2 * radius + 1).pow(2),
+            started.elapsed().as_secs_f64()
+        );
+        replica_half_width = Some(voxels.half_width);
+    }
+    if let Some(Built::Flat(radius)) = built {
         let (sx, sy, sz) = stream.player_spawn;
         let ground = sy.floor() as i32 - 1;
         let spawn_chunk = ((sx.floor() as i32) >> 4, (sz.floor() as i32) >> 4);
@@ -308,6 +345,7 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built:
         celestial,
         cloud_mask,
         crack_texture,
+        replica_half_width,
     })
 }
 
@@ -492,22 +530,36 @@ fn update(
                 Some("survival") => false,
                 _ => hosting,
             };
-            let kind = WorldKind::parse(
-                &std::env::var("IW4L_MINECRAFT_WORLD").ok().or_else(|| host_rule("scr_mc_world")).unwrap_or_default(),
-            );
+            // A replica map is its replica; the generated world takes Game
+            // Setup's MINECRAFT WORLD.
+            let kind = if assets::minecraft_map::is_replica(&match_.zone) {
+                WorldKind::Replica
+            } else {
+                WorldKind::parse(
+                    &std::env::var("IW4L_MINECRAFT_WORLD").ok().or_else(|| host_rule("scr_mc_world")).unwrap_or_default(),
+                )
+            };
             // Mobs live in the generated terrain, which a built arena replaces.
             let mobs = mobs && kind == WorldKind::Natural;
+            let content = authority.as_ref().map(|authority| authority.0.content());
+            let built = match (kind, content) {
+                (WorldKind::Flat, _) => Some(Built::Flat(arena_radius(border))),
+                (WorldKind::Replica, Some(content)) => Some(Built::Replica(content)),
+                _ => None,
+            };
+            // A replica's own spawn points and size decide the arena.
+            let view_distance_floor = if kind == WorldKind::Replica { 12 } else { 0 };
             runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, kit, kind, difficulty, check: None });
             diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
             // The host keeps the whole arena loaded around its centre.
-            let view_distance = VIEW_DISTANCE.max(arena_radius(border) + 1);
+            let view_distance = VIEW_DISTANCE.max(arena_radius(border) + 1).max(view_distance_floor);
             runtime.restore = loading_save.map(|(meta, _)| meta);
             let (send, receive) = mpsc::channel();
             let _ = std::thread::Builder::new()
                 .name("minecraft-world-load".into())
                 .spawn(move || {
-                    let _ = send.send(load(seed, world_dir, view_distance, Some((kind, arena_radius(border)))));
+                    let _ = send.send(load(seed, world_dir, view_distance, built));
                 });
             runtime.loading = Some(receive);
         }
@@ -587,6 +639,9 @@ fn update(
                 view.origin = [x, y, z];
                 if let Some(settings) = runtime.settings.as_mut() {
                     settings.origin = Some(view.origin);
+                    if let Some(half) = world.replica_half_width {
+                        settings.border = half.ceil() + 2.0;
+                    }
                 }
                 view.atlas = Some(world.atlas.clone());
                 view.celestial = Some(world.celestial.clone());
@@ -755,6 +810,9 @@ fn update(
         for (id, state) in &snapshot.players {
             if state.pm_type != 0 {
                 spawned.remove(id);
+            } else if settings.is_some_and(|s| s.kind == WorldKind::Replica) {
+                // A replica keeps the map's own spawn points.
+                spawned.insert(*id);
             } else if ground && !spawned.contains(id) {
                 // Teams on opposite sides of the arena, everyone else spread
                 // around it, on ground checked at every spawn.
@@ -1987,12 +2045,15 @@ enum WorldKind {
     Natural,
     /// Superflat, built by the host.
     Flat,
+    /// The stand-in MW2 map voxelized, built by the host.
+    Replica,
 }
 
 impl WorldKind {
     fn parse(name: &str) -> Self {
         match name.trim() {
             "flat" => Self::Flat,
+            "replica" => Self::Replica,
             _ => Self::Natural,
         }
     }
@@ -2001,6 +2062,7 @@ impl WorldKind {
         match self {
             Self::Natural => "natural",
             Self::Flat => "flat",
+            Self::Replica => "replica",
         }
     }
 }

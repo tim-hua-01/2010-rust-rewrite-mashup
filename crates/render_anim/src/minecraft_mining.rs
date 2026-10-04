@@ -315,7 +315,13 @@ fn hardness(world: &WorldRefs<'_>, pos: BlockPos) -> Option<f32> {
     }
     let state = world.stream.states.state_of(block)?;
     let speed = world.registries.blocks.state(state).destroy_speed;
-    (speed >= 0.0).then_some(speed)
+    (speed >= 0.0).then_some(speed * fortified(block))
+}
+
+/// How much tougher a replica's building block is than its kind
+/// (`minecraft_replica::FORTIFIED`).
+fn fortified(block: &minecraft_terrain::scene::Block) -> f32 {
+    if crate::minecraft_replica::FORTIFIED.contains(&block.id.path.as_str()) { 8.0 } else { 1.0 }
 }
 
 /// `ExplosionDamageCalculator.getBlockExplosionResistance`: none for air.
@@ -327,7 +333,7 @@ fn explosion_resistance(world: &WorldRefs<'_>, pos: BlockPos) -> Option<f32> {
         return None;
     }
     let fluid = if matches!(block.id.path.as_str(), "water" | "lava") { 100.0f32 } else { 0.0 };
-    Some(blocks.state(state).explosion_resistance.max(fluid))
+    Some((blocks.state(state).explosion_resistance * fortified(block)).max(fluid))
 }
 
 /// The ten destroy stages side by side, 16 pixels each.

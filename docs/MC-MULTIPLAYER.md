@@ -666,3 +666,15 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   client's spawn chunk matches, teams spawn ~76 blocks apart on the plain.
   Not done: a visible border wall; the HUD timer shows no time limit on
   Minecraft maps (`sim/src/world.rs` zeroes it while voxels are active).
+* **Replicas (2026-10-04):** `minecraft:rust` and `minecraft:terminal` are map
+  entries standing on mp_rust / mp_terminal; the host voxelizes that map's
+  clip brushes and terrain mesh (`render_anim/src/minecraft_replica.rs`) at the
+  voxel scale, so the map's own spawn points line up. Brushes: thin ones by
+  any of 27 samples, thick ones by the block centre; clip-only, sky and nodraw
+  skipped; the arena sized from 95% of brush centres (cap 128 blocks).
+  Buildings use a fortified palette (concrete, bricks, stone bricks,
+  terracotta, iron: 8x hardness and blast resistance); ground is its surface
+  block over two diggable layers on bedrock. Duo verified on Terminal: 130k
+  blocks, the client's spawn chunk matches. MW2 dynamic props (luggage) still
+  draw over the replica. Crash and Overgrown need the Stimulus Package DLC,
+  which isn't installed.

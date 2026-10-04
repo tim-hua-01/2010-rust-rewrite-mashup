@@ -987,7 +987,7 @@ fn preflight_match_install(
     };
     // The Minecraft world runs the level script of the map it stands in for.
     let script_map = if assets::minecraft_map::is_minecraft_load(zone) {
-        assets::minecraft_map::PROXY_MAP
+        assets::minecraft_map::proxy_map(zone)
     } else {
         zone
     };
