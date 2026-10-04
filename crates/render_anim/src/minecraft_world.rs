@@ -163,6 +163,8 @@ struct Runtime {
     shape_ids: HashMap<Vec<[u32; 6]>, u16>,
     /// Players the host has placed on the Minecraft spawn this life.
     spawned: std::collections::HashSet<sim::ClientId>,
+    /// How many times the host has spawned each player, to vary the spot.
+    spawn_counts: HashMap<sim::ClientId, u32>,
 }
 
 /// The player's MW2 body stands in the inventory's character window, on a
@@ -682,6 +684,7 @@ fn update(
         shapes,
         shape_ids,
         spawned,
+        spawn_counts,
         day,
         environment_accumulator,
         environment_primed,
@@ -726,12 +729,22 @@ fn update(
         && let Some(snapshot) = presented.snapshot()
     {
         let ground = world.scene.generated_chunk(spawn_chunk).is_some();
+        let border = settings.map_or(0.0, |s| s.border);
         for (id, state) in &snapshot.players {
             if state.pm_type != 0 {
                 spawned.remove(id);
-            } else if ground && !spawned.contains(id) && authority.0.teleport(*id, [0.0, 0.0, 0.0]) {
-                diag::info!(World, "Minecraft spawn: moved client {} to the world spawn", id.0);
-                spawned.insert(*id);
+            } else if ground && !spawned.contains(id) {
+                // Teams on opposite sides of the arena, everyone else spread
+                // around it, on ground checked at every spawn.
+                let team = snapshot.meta.for_client(*id).map_or(0, |m| m.client_state_team);
+                let count = spawn_counts.entry(*id).or_default();
+                let point = spawn_point(world, origin, border, team, u64::from(id.0) * 7919 + u64::from(*count));
+                let target = point.map_or([0.0, 0.0, 0.0], |p| sim::voxel::to_map(origin, p));
+                if authority.0.teleport(*id, target) {
+                    diag::info!(World, "Minecraft spawn: client {} (team {team}) at {point:?}", id.0);
+                    spawned.insert(*id);
+                    *count += 1;
+                }
             }
         }
         spawned.retain(|id| snapshot.players.iter().any(|(player, _)| player == id));
@@ -1326,9 +1339,11 @@ fn update(
                 entities.selected,
             );
         }
-        // The building kit, topped up once each life.
+        // The building kit, topped up once each life, after the guns have
+        // taken the first hotbar slots.
+        let armed = entities.inventory.slots.iter().flatten().any(|s| crate::minecraft_inventory::weapon_of(s).is_some());
         if settings.is_some_and(|s| s.kit) {
-            if alive && !*kit_given {
+            if alive && armed && !*kit_given {
                 for id in KIT {
                     let have: u32 = entities
                         .inventory
@@ -1884,4 +1899,57 @@ fn block_hits_player((x, y, z): (i32, i32, i32), players: &[[f64; 3]]) -> bool {
             && (fz - 0.42) < f64::from(z + 1)
             && (fz + 0.42) > f64::from(z)
     })
+}
+
+/// A spawn point in block space (the feet), on the surface inside the
+/// border: team 1 on one side of the arena and team 2 on the other, everyone
+/// else spread around it; `salt` varies the spot between spawns. None when
+/// no candidate has ground.
+fn spawn_point(world: &Loaded, origin: [f64; 3], border: f64, team: i32, salt: u64) -> Option<[f64; 3]> {
+    let radius = if border > 0.0 { (border * 0.6).max(4.0) } else { 10.0 };
+    let spread = (salt.wrapping_mul(0x9e37_79b9_7f4a_7c15) >> 33) as f64 / f64::from(1u32 << 31);
+    let base = match team {
+        1 => 0.0,
+        2 => std::f64::consts::PI,
+        _ => spread * std::f64::consts::TAU,
+    };
+    let limit = if border > 0.0 { border - 2.0 } else { f64::MAX };
+    for attempt in 0..16 {
+        // Nearby angles first, alternating sides, a little jitter for teams.
+        let step = f64::from((attempt + 1) / 2) * if attempt % 2 == 0 { 1.0 } else { -1.0 };
+        let angle = base + step * 0.35 + (spread - 0.5) * if team == 1 || team == 2 { 0.6 } else { 0.0 };
+        let dx = (radius * angle.cos()).clamp(-limit, limit);
+        let dz = (radius * angle.sin()).clamp(-limit, limit);
+        let (x, z) = ((origin[0] + dx).floor() as i32, (origin[2] + dz).floor() as i32);
+        if let Some(y) = surface(world, x, z, origin[1].floor() as i32) {
+            return Some([f64::from(x) + 0.5, f64::from(y) + 1.0, f64::from(z) + 0.5]);
+        }
+    }
+    None
+}
+
+/// The highest block near `around` in a column a player can stand on: solid
+/// to collision, not a fluid, with two free blocks above.
+fn surface(world: &Loaded, x: i32, z: i32, around: i32) -> Option<i32> {
+    let solid = |y: i32| {
+        minecraft_terrain::scene::Scene::block(&world.scene, (x, y, z)).is_some_and(|block| {
+            !matches!(block.id.path.as_str(), "water" | "lava")
+                && world
+                    .stream
+                    .states
+                    .state_of(block)
+                    .is_some_and(|state| !world.registries.blocks.collision_boxes(state).is_empty())
+        })
+    };
+    let free = |y: i32| {
+        minecraft_terrain::scene::Scene::block(&world.scene, (x, y, z)).is_none_or(|block| {
+            !matches!(block.id.path.as_str(), "water" | "lava")
+                && world
+                    .stream
+                    .states
+                    .state_of(block)
+                    .is_none_or(|state| world.registries.blocks.collision_boxes(state).is_empty())
+        })
+    };
+    (around - 48..=around + 48).rev().find(|&y| solid(y) && free(y + 1) && free(y + 2))
 }

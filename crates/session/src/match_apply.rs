@@ -1045,8 +1045,12 @@ fn preflight_match_install(
             None => script_dvars.push((name.into(), seconds.into())),
         }
     }
-    // A Minecraft world has no time or score limit.
-    if assets::minecraft_map::is_minecraft_load(zone) {
+    // A Minecraft world has no time or score limit, unless the host chose the
+    // mode's own limits (Game Setup's MINECRAFT MATCH, `scr_mc_limits`).
+    let mode_limits = rules.is_some_and(|rules| {
+        rules.0.iter().any(|(name, value)| name.eq_ignore_ascii_case("scr_mc_limits") && value == "normal")
+    });
+    if assets::minecraft_map::is_minecraft_load(zone) && !mode_limits {
         for limit in ["timelimit", "scorelimit"] {
             let name = format!("scr_{gametype}_{limit}");
             match script_dvars.iter_mut().find(|(set, _)| set.eq_ignore_ascii_case(&name)) {
