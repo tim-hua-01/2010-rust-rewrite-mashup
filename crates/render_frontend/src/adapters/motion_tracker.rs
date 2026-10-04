@@ -18,6 +18,8 @@ const SWEEP_SPEED: f32 = 2000.0;
 const FADE_MS: i32 = 3000;
 const CENTER_Y: f32 = -0.37;
 const PING_SIZE: f32 = 0.2;
+/// How far above or below the player, in blocks, a Minecraft mob still shows.
+const MOB_HEIGHT_BLOCKS: f32 = 10.0;
 
 #[derive(Clone, Copy)]
 struct Ping {
@@ -187,7 +189,12 @@ pub(crate) fn draw_motion_tracker(
                     || meta.client_state_team != actor.client_state_team;
                 candidates.push((Contact::Player(*id), Vec2::new(state.origin[0], state.origin[1]), enemy));
             }
+            // Mobs more than ten blocks above or below (in caves, on cliffs)
+            // stay off the sensor.
             for (key, centre, hostile) in sim::voxel::mob_contacts() {
+                if (centre[2] - ps.origin[2]).abs() > MOB_HEIGHT_BLOCKS * sim::voxel::BLOCK {
+                    continue;
+                }
                 candidates.push((Contact::Mob(key), Vec2::new(centre[0], centre[1]), hostile));
             }
         }
