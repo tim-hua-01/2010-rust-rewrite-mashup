@@ -340,3 +340,244 @@ tracking); predicted block placement.
 * Killcam and demo playback on Minecraft maps (the killcam replays snapshots;
   edits would need replaying too).
 * Bots in Minecraft worlds (they use the MW2 map's navigation).
+
+---
+
+## Review feedback (2026-10-03)
+
+The overall architecture is a good fit for friends-only multiplayer:
+deterministic base terrain, host-authoritative changes, and trusted local
+inventories. The recommendations below tighten the implementation contracts
+and phase dependencies. They are review proposals, not additional decisions.
+They come from reading this plan and the relevant code; this review did not
+run `make duo` or reproduce the runtime observations in Part 1.
+
+Priority: **P1** means resolve before implementing the affected protocol or
+runtime path; **P2** means address in the phase breakdown or acceptance checks.
+
+### F1. P1 — Define the handoff from join state to live edits (D2, D6, D7)
+
+A compacted list is world state, not a contiguous edit history. If the host
+has applied 1,000 edits to 100 positions, sending those 100 positions cannot
+satisfy a client waiting for sequences 1 through 1,000. Edits made while the
+join state is being prepared or terrain is loading also need an explicit
+ordering boundary. The bootstrap and control streams must not be assumed to
+arrive in order relative to each other.
+
+Suggested contract:
+
+1. Capture an immutable compacted view at edit sequence **S**. Its header
+   identifies the match epoch/world, world settings, and `through_seq = S`.
+   The records describe the latest state at each edited position through S;
+   they do not pretend to be the original edit sequence.
+2. Retain and deliver every live edit after S for that joining client. Buffer
+   live edits that arrive before the base world and compacted view are ready.
+3. Install the compacted view, set `next_seq = S + 1`, and drain the buffered
+   contiguous suffix. Ignore duplicates already applied; reject stale epochs.
+4. Admit the player only after settings, spawn-area collision, the complete
+   compacted view, and a declared catch-up watermark are installed. Define
+   that watermark so continuous destruction cannot keep moving the readiness
+   target indefinitely.
+5. Give chunked fallback transfers an identity, part count or completion
+   marker, and the same S. A missing part or sequence must have a timeout and
+   explicit retry/resync/failure behavior rather than waiting forever.
+
+The current `BootstrapTransaction` in `crates/net/src/transport/bootstrap.rs`
+describes a snapshot offer. `flush_bootstrap_applied` in
+`crates/net/src/client/runtime.rs` acknowledges after snapshot adoption;
+Minecraft readiness is not part of that acknowledgement today. Decide how
+`McWorld` extends that transaction or supplies a separate readiness gate.
+Also distinguish waiting for settings from having a load thread running:
+`loading_world = runtime.loading.is_some()` alone would become false while a
+new client is still waiting for the host's settings.
+
+**Acceptance:** join while the host repeatedly edits the same positions and
+continues blasting throughout loading. Both peers converge to the same
+compacted state; no missing-sequence wait occurs. Disconnect/rejoin and change
+maps while a transfer is pending; old-world records never reach the new world.
+Applying join state produces no historical break sounds or particles.
+
+### F2. P1 — Persist edits independently of loaded chunks (D2, D6)
+
+There is a concrete hazard in the current apply primitives:
+
+* `HandcraftedScene::set(pos, None)` in
+  `crates/minecraft_terrain/src/scene.rs` only records a cleared position when
+  `generated_block(pos)` exists. Clearing an ungenerated block leaves no air
+  marker.
+* `sim::voxel::set_block_shape` only updates an already loaded voxel chunk.
+* `ChunkMap::set_blocks` in
+  `third_party/minecraftoss/world/src/chunk_map.rs` ignores edits for chunks
+  absent from its current chunk set.
+
+Consequently, applying D6's calls once when a network edit arrives is not
+sufficient. A far-away destruction edit can disappear when the client later
+generates that chunk. A placement can remain in the scene overlay while the
+new chunk's collision is built from unedited generated states.
+
+Keep a persistent per-chunk overlay of the latest authoritative state at each
+edited position, including explicit air. Store received edits even when no
+terrain is loaded. When a chunk arrives, apply its overlay before publishing
+collision, lighting, or meshes. Chunk eviction must not discard the overlay;
+world teardown must clear it. For loaded chunks, update the overlay and all
+representations through one apply path. Snapshot installation should batch
+remeshing and lighting work rather than schedule it once per historical edit.
+
+**Acceptance:** receive air and placement edits before generation, then load
+the chunk and check both rendering and collision. Walk far enough to unload
+it, return, and repeat. Include negative chunk coordinates and section-edge
+edits so indexing and neighboring mesh invalidation are exercised.
+
+### F3. P1 — Budget queue capacity and complete control frames (D7)
+
+A per-tick row cap limits production rate; it does not bound accumulated
+unacknowledged rows. At one new row per tick, a client whose acknowledgements
+stall can still fill the 64-row queue. Other events and action outcomes share
+that queue.
+
+There is also a separate byte limit. `PeerReplication::queue_control` in
+`crates/net/src/transport/udp_session.rs` encodes multiple fresh reliable rows
+into one `ServerPacket::Control`. `ControlFrame::Relay` in
+`crates/master_protocol/src/lib.rs` checks the complete payload against
+`MAX_CONTROL_BYTES - HEADER_BYTES`. Two individually valid large edit rows
+can exceed that limit together.
+
+Suggested implementation:
+
+* Check each client's outstanding reliable count before enqueueing, reserving
+  capacity for outcomes and other game events. Keep its unsent edit cursor
+  outside the reliable queue and advance it only after successful enqueue.
+* Split complete encoded control packets by byte budget, including all row,
+  packet, and relay headers. Derive edit batch size from the encoder, not the
+  approximate "900 edits" figure.
+* Define bounds for retained edit history and join buffers. If a client falls
+  behind that retained range, start a new compacted catch-up or retire it with
+  a clear reason. Never skip arbitrary live edits to make space.
+* Log outstanding rows, pending edit bytes, and edit lag per client. A slow
+  client should not block healthy peers or make host memory grow indefinitely.
+
+**Acceptance:** stall acknowledgements during sustained explosions and an
+oversized join transfer. No attempted enqueue overflows the reliable queue;
+every encoded frame fits the transport limit; a healthy peer keeps receiving
+edits. Resume acknowledgements and verify convergence, or exercise the
+documented resync/failure policy when the backlog bound is exceeded.
+
+### F4. P1 — Tie inventory mutations to action outcomes (D7, D8)
+
+`McEdit { pos, state }` does not identify the requester or placement request.
+"Remove the item when the edit comes back" cannot reliably distinguish the
+client's placement from somebody else's edit at the same position. Slot
+changes, concurrent requests, and rejected placements make this ambiguous.
+The existing `ReliableInbound::apply` consumes `ActionOutcome` and retires
+the action without notifying an inventory handler.
+
+Use the existing action request ID convention for `McPlace` and `McMine`.
+For placement, reserve one item against that request, preserving its identity
+even if the selected slot changes. An applied outcome consumes the reservation
+once; a refused outcome releases it once. The edit stream updates the world
+independently. Expose outcomes to the Minecraft inventory layer and define
+reservation behavior across death, kit refill, disconnect, and world teardown.
+
+On the host, record `Applied` only after validation and the authoritative edit
+commit. `record_action_outcomes` currently infers success from the absence of
+a recognized refusal event; Minecraft refusals must participate in that path,
+or the new actions need an explicit result path. Reuse action-ledger
+deduplication so retries cannot apply the placement or consume the item twice.
+Listen-host placements should use the same validation and commit path.
+
+Use one authoritative mutation function for mining, blasts, placements, and
+server changes: update world state, append the edit sequence, and produce
+credit/effects as appropriate. This makes it harder for a new edit source to
+change terrain without being replicated. Keep historical catch-up silent and
+distinguish placement effects from break effects. For `McMine`, award hand
+progress at the host's tick cadence; a burst of delayed requests must not
+become several simultaneous mining ticks merely because they arrive together.
+
+**Acceptance:** switch slots while placement is pending; send two placements
+with one item remaining; have two players place into the same cell; resend an
+identical request; reject placement inside a player; die before the outcome.
+Each accepted request consumes exactly one reserved item, each refusal
+consumes none, and host/client input produces the same result. Survival credit
+is issued once to the breaker chosen by the host's processing order.
+
+### F5. P2 — Establish bounded collision before multiplayer movement (D4, D5, D10)
+
+Phase 2's whole-arena coverage assumes players stay inside a border, but border
+enforcement currently arrives in Phase 4. Before then, a remote player can
+leave the loaded collision area. Move authoritative arena coverage and the
+collision border to Phase 1; keep the visual wall in Phase 4 if desired.
+
+Specify the arena centre, border shape, supported radius range, and conversion
+between map and block coordinates. Derive coverage with margin for player
+boxes and neighboring generation/light work, and wait for necessary collision
+before spawning players. The current `set_view_distance` couples server
+tracking to render sections; make authority coverage independent of a host's
+render-distance preference so a graphics change cannot remove remote ground.
+
+Spawn generation is also not a one-time safety guarantee. Destruction can
+remove a spawn's floor and building can obstruct it. Validate ground, headroom,
+and border clearance on every spawn/respawn, then choose another candidate
+or a defined fallback. Replace the existing voxel-active origin shortcut in
+`crates/sim/src/spawn.rs` when introducing generated and replica spawn points.
+
+**Acceptance:** place the remote player near the border, far from the host,
+and verify walking, skating, shooting, and placement against the loaded world.
+Change the host's render preference without losing remote collision. Destroy
+or obstruct spawn candidates and verify respawns remain inside the arena on
+valid ground.
+
+### F6. P2 — Separate replica feasibility from arena/TDM delivery (D11, Phase 4)
+
+Brush voxelization is a useful starting point, but it does not establish a
+block-for-block map replica. `install_clip_and_player` installs brushes,
+triangle meshes, and static-model collision separately in
+`crates/session/src/match_apply.rs`. A brush-only conversion omits the latter
+geometry, while collision-only data does not capture every visible detail.
+Choose whether the first deliverable is a playable collision-derived remake
+or a closer visual replica, and estimate those scopes separately.
+
+Conservative overlap filling preserves thin walls but can thicken opposing
+walls until doorways, stairs, and passages become unusable. Prototype Rust
+first and inspect recognizable geometry, important routes, player clearance,
+spawn accessibility, and destructible surfaces before generalizing to Terminal.
+Decide which collision contents count as physical geometry; trigger and
+invisible clipping volumes should not automatically become visible buildings.
+
+Define a stable replica origin/transform and cache identity. Include source
+map content, voxel scale, voxelizer version, and material mapping in the cache
+key so algorithm changes do not silently reuse old worlds. A replica border
+must fit the selected map rather than inherit a too-small natural-world radius.
+Keep flat arenas and TDM as one milestone and replica conversion as a separate
+prototype/milestone, then revise the estimate using that result.
+
+**Acceptance:** the Rust prototype has agreed recognizable features, usable
+routes and spawns, and matching world/collision checksums on both peers.
+Destroy and rebuild a wall, then join late. Changing the voxelizer or mapping
+invalidates the cache and both peers still choose the same base world.
+
+### Suggested phase changes and additional validation
+
+Keep the existing phase structure, with these dependency changes:
+
+| Phase | Recommended adjustment |
+| --- | --- |
+| 1 | Add bounded authority collision coverage, collision border, explicit settings/loading readiness, and a base-world compatibility check. |
+| 2 | Specify snapshot watermark/epoch and admission handoff first; implement persistent chunk overlays and queue/frame budgets with edit replication. |
+| 3 | Add item reservations, outcome delivery to inventory, and explicit host action results before enabling placement. |
+| 4 | Deliver safe respawns, flat arenas, TDM, and the border visual; split replica feasibility into its own milestone. |
+| 5 | Test a real remote connection with the same convergence and backlog checks used locally. |
+
+Keep duo screenshots and prediction logs, but also compare block-state
+checksums and selected collision probes after edits and catch-up. Compare base
+terrain at the same generation stage, and edited terrain at the same edit
+watermark, to avoid treating legitimate in-flight changes as divergence.
+Include a data/generator identity in world compatibility; protocol version
+alone does not prove matching Minecraft data or replica caches. A known base
+world mismatch should fail visibly instead of letting peers play on different
+terrain. Same-machine duo tests do not establish cross-machine determinism.
+
+For actual TDM acceptance, define score/time-limit behavior: Minecraft setup
+currently forces those limits to zero in `crates/session/src/match_apply.rs`.
+For v1, explicitly choose whether Minecraft killcams and demos are disabled
+or accepted with current terrain; accurate historical terrain needs edit
+replay. These choices should be stated before calling the PvP milestone done.
