@@ -341,6 +341,8 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
             shapes,
         });
     }
+    // Whole blocks are stepped up, as vanilla's auto-jump does.
+    movement_iw4::set_step_size_override(Some(BLOCK + 1.0));
     bump();
 }
 
@@ -352,6 +354,7 @@ pub fn deactivate() {
     let _ = take_player_damage();
     set_mob_boxes(Vec::new());
     set_mob_hostile(Vec::new());
+    movement_iw4::set_step_size_override(None);
 }
 
 /// Adds shape ids to the table and returns the first new id.

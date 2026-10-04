@@ -34,6 +34,7 @@ mod viewangles;
 mod walk;
 
 pub use accelerate::accelerate;
+pub use slide::set_step_size_override;
 pub use ads_frac::{AdsFracContext, update_ads_frac};
 pub use ads_intent::{AdsIntentContext, AdsIntentResult, BUTTON_ADS, update_ads_intent};
 pub use air::{AirMoveContext, air_move};

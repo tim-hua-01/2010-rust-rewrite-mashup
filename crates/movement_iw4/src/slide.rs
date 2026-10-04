@@ -10,6 +10,22 @@ const MAX_CLIP_PLANES: usize = 8;
 
 const STEP_SIZE: f32 = 18.0;
 
+/// A step height in place of `STEP_SIZE` while it is set (f32 bits; 0 is
+/// none): a Minecraft world steps up a whole block, as vanilla's auto-jump
+/// does, where 18 units is half of one.
+static STEP_SIZE_OVERRIDE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+pub fn set_step_size_override(step: Option<f32>) {
+    STEP_SIZE_OVERRIDE.store(step.map_or(0, f32::to_bits), core::sync::atomic::Ordering::Relaxed);
+}
+
+fn standing_step_size() -> f32 {
+    match STEP_SIZE_OVERRIDE.load(core::sync::atomic::Ordering::Relaxed) {
+        0 => STEP_SIZE,
+        bits => f32::from_bits(bits),
+    }
+}
+
 const PRONE_STEP_SIZE: f32 = 10.0;
 
 const STEP_UP_EXTRA: f32 = 1.0;
@@ -208,7 +224,7 @@ pub fn step_slide_move<C: CollisionBackend>(
     let mut step_size = if (ps.pm_flags & pm_flags::PRONE) != 0 {
         PRONE_STEP_SIZE
     } else {
-        STEP_SIZE
+        standing_step_size()
     };
 
     if ps.ground_entity_num == ENTITYNUM_NONE {
