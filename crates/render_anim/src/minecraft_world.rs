@@ -153,7 +153,8 @@ struct Runtime {
     shapes: HashMap<BlockStateId, u16>,
     /// Boxes of each shape id, to reuse an id for a repeated shape.
     shape_ids: HashMap<Vec<[u32; 6]>, u16>,
-    was_alive: bool,
+    /// Players the host has placed on the Minecraft spawn this life.
+    spawned: std::collections::HashSet<sim::ClientId>,
 }
 
 /// The player's MW2 body stands in the inventory's character window, on a
@@ -416,16 +417,19 @@ fn update(
             let rule = host_rule("scr_mc_difficulty");
             // The border's half width in blocks (0: none), and the mobs:
             // auto is off in a lobby hosted for others, on alone.
-            let border = host_rule("scr_mc_border")
-                .or_else(|| std::env::var("IW4L_MINECRAFT_BORDER").ok())
+            // An environment override (testing) wins over Game Setup.
+            let border = std::env::var("IW4L_MINECRAFT_BORDER")
+                .ok()
+                .or_else(|| host_rule("scr_mc_border"))
                 .and_then(|v| v.trim().parse::<f64>().ok())
                 .unwrap_or(0.0)
                 .max(0.0);
             let hosting = master
                 .as_ref()
                 .is_some_and(|m| matches!(m.state(), net::MasterBridgeState::Hosting { .. }));
-            let mobs = match host_rule("scr_mc_mobs")
-                .or_else(|| std::env::var("IW4L_MINECRAFT_MOBS").ok())
+            let mobs = match std::env::var("IW4L_MINECRAFT_MOBS")
+                .ok()
+                .or_else(|| host_rule("scr_mc_mobs"))
                 .as_deref()
                 .map(str::trim)
             {
@@ -627,7 +631,7 @@ fn update(
                 runtime.world = Some(world);
                 runtime.shapes.clear();
                 runtime.shape_ids.clear();
-                runtime.was_alive = false;
+                runtime.spawned.clear();
             }
             Err(error) => {
                 diag::warn!(World, "Minecraft world failed to load: {error}");
@@ -641,7 +645,7 @@ fn update(
         world,
         shapes,
         shape_ids,
-        was_alive,
+        spawned,
         day,
         environment_accumulator,
         environment_primed,
@@ -675,16 +679,22 @@ fn update(
     // Every spawn lands on the Minecraft spawn once its ground exists.
     let spawn_chunk = ((origin[0].floor() as i32) >> 4, (origin[2].floor() as i32) >> 4);
     let alive = ps.is_some_and(|ps| ps.pm_type == 0);
-    if let Some(authority) = authority.as_mut() {
-        if alive && !*was_alive && world.scene.generated_chunk(spawn_chunk).is_some() {
-            // Retried each frame until the authority has the player to move.
-            if authority.0.teleport(local.0, [0.0, 0.0, 0.0]) {
-                diag::info!(World, "Minecraft spawn: moved to the world spawn");
-                *was_alive = true;
+    // The host places every player (remote ones too: the stand-in map's own
+    // spawn points can lie outside the border) on the spawn once its ground
+    // exists, retried each frame until the authority has them to move.
+    if let Some(authority) = authority.as_mut()
+        && let Some(snapshot) = presented.snapshot()
+    {
+        let ground = world.scene.generated_chunk(spawn_chunk).is_some();
+        for (id, state) in &snapshot.players {
+            if state.pm_type != 0 {
+                spawned.remove(id);
+            } else if ground && !spawned.contains(id) && authority.0.teleport(*id, [0.0, 0.0, 0.0]) {
+                diag::info!(World, "Minecraft spawn: moved client {} to the world spawn", id.0);
+                spawned.insert(*id);
             }
-        } else if !alive {
-            *was_alive = false;
         }
+        spawned.retain(|id| snapshot.players.iter().any(|(player, _)| player == id));
     }
 
     let feet = ps.map(|ps| sim::voxel::to_block(origin, ps.origin));

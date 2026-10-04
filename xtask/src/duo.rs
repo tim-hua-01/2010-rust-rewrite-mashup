@@ -69,6 +69,12 @@ fn launch(root: &Path, run: &Path, binary: &Path, role: &str) -> Res<Player> {
             directory.join("iw4l-artifacts/cache"),
         )
         .map_err(|e| e.to_string())?;
+        // Minecraft's files, fetched once from Mojang, are shared too.
+        let minecraft = root.join("iw4l-artifacts/minecraft-26.3");
+        if minecraft.is_dir() {
+            std::os::unix::fs::symlink(&minecraft, directory.join("iw4l-artifacts/minecraft-26.3"))
+                .map_err(|e| e.to_string())?;
+        }
     }
     fs::write(
         directory.join("settings.cfg"),
