@@ -146,9 +146,9 @@ fn set_ammo_on_ps(
 const BLOCK_WORLD_GUNS: [&str; 3] = ["cheytac_mp", "spas12_mp", "ump45_mp"];
 
 /// On a Minecraft map every player also carries the Intervention, SPAS-12
-/// and UMP45, and never runs out: each weapon's clips stay full and its
-/// reserve (grenades too) at the most it holds, as MW2's
-/// `player_sustainAmmo` keeps them.
+/// and UMP45, and never runs out: a gun's reserve stays at the most it
+/// holds, as MW2's `player_sustainAmmo` keeps it, but its magazine empties
+/// and is reloaded as usual; grenades and equipment stay full.
 pub(crate) fn sustain_block_world_arsenal(world: &mut FrameWorld) {
     if !crate::voxel::active() || !world.publishes_snapshot() {
         return;
@@ -184,15 +184,23 @@ pub(crate) fn sustain_block_world_arsenal(world: &mut FrameWorld) {
             };
             let (clip_r, clip_l, stock) = ammo_from_ps(world, &ps, weapon);
             let full_stock = facts.max_ammo.max(facts.start_ammo);
-            let full_l = if clip_l > 0 { facts.clip_size } else { 0 };
-            if clip_r < facts.clip_size || clip_l < full_l || stock < full_stock {
-                set_ammo_on_ps(world, &mut ps, weapon, facts.clip_size, full_l, full_stock);
+            // Guns and their alternate modes (inventory types 0 and 3) keep
+            // their magazines as fired; offhand grenades and items refill.
+            let reloads = matches!(facts.inventory_type, 0 | 3);
+            let (want_r, want_l) = if reloads {
+                (clip_r, clip_l)
+            } else {
+                (facts.clip_size, if clip_l > 0 { facts.clip_size } else { 0 })
+            };
+            if clip_r < want_r || clip_l < want_l || stock < full_stock {
+                set_ammo_on_ps(world, &mut ps, weapon, want_r, want_l, full_stock);
             }
             // The match's own ledger, which grenades are thrown from.
             let meta = world.client_meta_mut(id);
             let (clip, stock) = meta.ammo_for(weapon);
-            if clip < facts.clip_size || stock < full_stock {
-                meta.set_ammo(weapon, facts.clip_size, full_stock);
+            let want_clip = if reloads { clip } else { facts.clip_size };
+            if clip < want_clip || stock < full_stock {
+                meta.set_ammo(weapon, want_clip, full_stock);
             }
         }
         world.client_meta_mut(id).mirror_held_ammo(ps.weapon);
