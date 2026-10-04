@@ -242,11 +242,33 @@ fn install_minecraft_controls(catalog: &mut asset_game::MenuCatalog) {
     controls.items.push(link);
 }
 
-/// Game Setup's MINECRAFT DIFFICULTY row: a host rule, `scr_mc_difficulty`,
-/// that the Minecraft world reads when the match installs. It is a button
-/// like its neighbours whose text names the choice; the popup's panel grows
-/// to hold it and the password row, which retail's four-row panel left out.
+/// Game Setup's Minecraft rows, each a host rule the Minecraft world reads
+/// when the match installs: difficulty (`scr_mc_difficulty`), the world
+/// border (`scr_mc_border`, half width in blocks) and mobs (`scr_mc_mobs`;
+/// auto is off when hosting for others). Each is a button like its
+/// neighbours whose text names the choice; the popup's panel grows to hold
+/// them and the password row, which retail's four-row panel left out.
 fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
+    const ROWS: [(&str, &str, &[(&str, &str)]); 3] = [
+        ("mc_difficulty", "scr_mc_difficulty", &[
+            ("MINECRAFT DIFFICULTY: PEACEFUL", "0"),
+            ("MINECRAFT DIFFICULTY: EASY", "1"),
+            ("MINECRAFT DIFFICULTY: NORMAL", "2"),
+            ("MINECRAFT DIFFICULTY: HARD", "3"),
+        ]),
+        ("mc_border", "scr_mc_border", &[
+            ("MINECRAFT BORDER: OFF", "0"),
+            ("MINECRAFT BORDER: 32 BLOCKS", "32"),
+            ("MINECRAFT BORDER: 64 BLOCKS", "64"),
+            ("MINECRAFT BORDER: 96 BLOCKS", "96"),
+            ("MINECRAFT BORDER: 128 BLOCKS", "128"),
+        ]),
+        ("mc_mobs", "scr_mc_mobs", &[
+            ("MINECRAFT MOBS: AUTO", "auto"),
+            ("MINECRAFT MOBS: ON", "1"),
+            ("MINECRAFT MOBS: OFF", "0"),
+        ]),
+    ];
     let Some(setup) = catalog.menus.get_mut("lobby_game_setup") else {
         return;
     };
@@ -254,33 +276,39 @@ fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
         return;
     };
     let row = template.rect.y;
+    let added = ROWS.len() as f32 * 20.0;
     for item in &mut setup.items {
         if item.item_type == 1 && item.rect.x == template.rect.x && item.rect.y >= row {
-            item.rect.y += 20.0;
+            item.rect.y += added;
         }
-        // The panel and its shadow are `24 + rows * 20` tall.
+        // The panel and its shadow are `24 + rows * 20` tall: retail's four,
+        // the password row and these.
         for (_, expression) in &mut item.float_exp {
-            *expression = expression.replace("op 16 4 op 1 op 2 20", "op 16 6 op 1 op 2 20");
+            *expression = expression.replace(
+                "op 16 4 op 1 op 2 20",
+                &format!("op 16 {} op 1 op 2 20", 5 + ROWS.len()),
+            );
         }
     }
     for (_, expression) in &mut setup.float_exp {
         if let Ok(height) = expression.parse::<f32>()
             && height >= 140.0
         {
-            *expression = (height + 20.0).to_string();
+            *expression = (height + added).to_string();
         }
     }
-    let mut choice = template;
-    choice.name = "mc_difficulty".into();
-    choice.item_type = 12;
-    choice.dvar = "scr_mc_difficulty".into();
-    choice.choices = [("PEACEFUL", "0"), ("EASY", "1"), ("NORMAL", "2"), ("HARD", "3")]
-        .map(|(level, value)| (format!("MINECRAFT DIFFICULTY: {level}"), value.to_owned()))
-        .to_vec();
-    choice.text_key.clear();
-    choice.text_exp.clear();
-    choice.handlers.action = vec![asset_game::MenuEvent::Script("play mouse_click;".into())];
-    setup.items.push(choice);
+    for (index, (name, dvar, choices)) in ROWS.iter().enumerate() {
+        let mut choice = template.clone();
+        choice.name = (*name).into();
+        choice.item_type = 12;
+        choice.dvar = (*dvar).into();
+        choice.rect.y = row + index as f32 * 20.0;
+        choice.choices = choices.iter().map(|(text, value)| ((*text).to_owned(), (*value).to_owned())).collect();
+        choice.text_key.clear();
+        choice.text_exp.clear();
+        choice.handlers.action = vec![asset_game::MenuEvent::Script("play mouse_click;".into())];
+        setup.items.push(choice);
+    }
 }
 
 fn hex(text: &str) -> String {

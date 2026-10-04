@@ -279,6 +279,18 @@ impl SimWorld {
         self.frame().teleport(id, origin)
     }
 
+    /// Publishes `name = value` to every client with the match's server info
+    /// (`ObjectiveMatch::server_info`), as GSC's `makedvarserverinfo` does.
+    pub fn set_server_info(&mut self, name: &str, value: &str) {
+        let mut runtime = self.ecs.resource_mut::<crate::script::Runtime>();
+        if runtime.dvars.get(name).map(String::as_str) != Some(value) {
+            runtime.dvars.insert(name.to_owned(), value.to_owned());
+        }
+        if !runtime.server_info.contains(name) {
+            runtime.server_info.insert(name.to_owned());
+        }
+    }
+
     pub fn set_viewangles(&mut self, id: ClientId, viewangles: [f32; 3]) -> bool {
         self.frame().set_viewangles(id, viewangles)
     }

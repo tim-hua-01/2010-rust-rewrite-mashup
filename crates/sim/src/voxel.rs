@@ -35,7 +35,14 @@ pub struct VoxelWorld {
     /// Collision boxes of each shape id, in block space `[min, max]`; id 0 is
     /// empty.
     shapes: Vec<Vec<[f32; 6]>>,
+    /// The world border: a block-space centre (x, z) and half width. Every
+    /// column outside it is solid, so players and bullets stop at it the same
+    /// on the host and in client prediction.
+    border: Option<([f64; 2], f64)>,
 }
+
+/// A whole block, for the columns beyond the world border.
+const BORDER_SHAPE: &[[f32; 6]] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
 
 static WORLD: RwLock<Option<VoxelWorld>> = RwLock::new(None);
 /// Bumped whenever the block world's collision changes.
@@ -339,6 +346,7 @@ pub fn activate(brushes: &[SimBrush], origin: [f64; 3], shapes: Vec<Vec<[f32; 6]
             origin,
             chunks: HashMap::new(),
             shapes,
+            border: None,
         });
     }
     // Whole blocks are stepped up, as vanilla's auto-jump does.
@@ -374,6 +382,26 @@ pub fn set_chunk(x: i32, z: i32, chunk: VoxelChunk) {
     }
     let (min, max) = chunk_region(x, z);
     bump_region(min, max);
+}
+
+/// Sets or clears the world border (block-space centre x/z, half width).
+pub fn set_border(border: Option<([f64; 2], f64)>) {
+    if let Ok(mut world) = WORLD.write()
+        && let Some(world) = world.as_mut()
+    {
+        if world.border != border {
+            world.border = border;
+            drop(world);
+            bump();
+        }
+    }
+}
+
+/// Whether a block column lies inside the world border (always, without one).
+pub fn inside_border(x: i32, z: i32) -> bool {
+    WORLD.read().ok().and_then(|world| world.as_ref().and_then(|w| w.border)).is_none_or(|([cx, cz], half)| {
+        (f64::from(x) + 0.5 - cx).abs().max((f64::from(z) + 0.5 - cz).abs()) <= half
+    })
 }
 
 pub fn remove_chunk(x: i32, z: i32) {
@@ -497,6 +525,11 @@ pub fn to_map(origin: [f64; 3], b: [f64; 3]) -> [f32; 3] {
 
 impl VoxelWorld {
     fn shape_at(&self, x: i32, y: i32, z: i32) -> &[[f32; 6]] {
+        if let Some(([cx, cz], half)) = self.border
+            && (f64::from(x) + 0.5 - cx).abs().max((f64::from(z) + 0.5 - cz).abs()) > half
+        {
+            return BORDER_SHAPE;
+        }
         let Some(chunk) = self.chunks.get(&(x >> 4, z >> 4)) else {
             return &[];
         };

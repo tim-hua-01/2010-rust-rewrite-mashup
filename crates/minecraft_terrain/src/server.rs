@@ -21,6 +21,8 @@ pub enum PlayerEdit {
 }
 
 pub struct ServerSim {
+    /// Whether the level has mobs: off, chunks bring none and nothing spawns.
+    mobs_enabled: bool,
     level: Level<'static>,
     states: Arc<BlockStates>,
     /// Mobs, ticked after the level each tick.
@@ -196,6 +198,7 @@ impl ServerSim {
         mobs.set_uuid_salt(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64));
         mobs.pois = minecraftoss_entities::poi::PoiManager::new(range.start >> 4, (range.end - 1) >> 4);
         Self {
+            mobs_enabled: true,
             level,
             states,
             mobs,
@@ -368,6 +371,9 @@ impl ServerSim {
                 None
             })
         });
+        if !self.mobs_enabled {
+            return;
+        }
         for tag in saved.unwrap_or_else(|| chunk.generation.entities.clone()) {
             self.add_saved_entity(tag);
         }
@@ -835,6 +841,8 @@ pub enum Command {
     RecipeBook(Arc<minecraftoss_player::crafting::RecipeBook>),
     /// The data JAR and world seed the server's loot tables come from.
     LootTables { jar: std::path::PathBuf, seed: u64 },
+    /// Whether the level has mobs (`ServerSim::mobs_enabled`).
+    Mobs(bool),
     /// `summon minecraft:experience_orb`.
     SummonOrb { position: [f64; 3], value: i32 },
     /// `/summon` for a mob, with the command's NBT and the new mob's own
@@ -1014,6 +1022,11 @@ impl ServerHandle {
         self.send(Command::LootTables { jar, seed });
     }
 
+    /// Turns the level's mobs on or off; send it before the first chunk.
+    pub fn set_mobs(&mut self, enabled: bool) {
+        self.send(Command::Mobs(enabled));
+    }
+
     /// An operation on the player's trading screen, with a copy of the
     /// player's inventory.
     pub fn merchant(&mut self, op: MerchantOp, inventory: &minecraftoss_player::inventory::Inventory, selected: usize, feet: [f64; 3]) {
@@ -1108,6 +1121,7 @@ fn server_loop(mut sim: ServerSim, commands: std::sync::mpsc::Receiver<Command>,
                 }
                 Command::RecipeBook(recipes) => sim.set_recipe_book(recipes),
                 Command::LootTables { jar, seed } => sim.load_loot(&jar, seed),
+                Command::Mobs(enabled) => sim.mobs_enabled = enabled,
                 Command::SummonOrb { position, value } => sim.summon_orb(position, value),
                 Command::Summon { kind, position, nbt, y_rot } => {
                     out.summoned.push(sim.summon(&kind, position, nbt.as_ref(), y_rot).map(|()| kind));
@@ -1133,7 +1147,7 @@ fn server_loop(mut sim: ServerSim, commands: std::sync::mpsc::Receiver<Command>,
                     sim.level.living_players = input.mob_players.iter().filter(|p| p.alive && !p.spectator).map(|p| (p.position.to_array(), f64::from(p.eye_height))).collect();
                     sim.set_simulation_area(input.simulation_center, input.simulation_distance);
                     if let Some(natural) = &mut sim.level.natural_spawning {
-                        natural.spawn_mobs = input.spawn_mobs;
+                        natural.spawn_mobs = input.spawn_mobs && sim.mobs_enabled;
                     }
                     sim.prepare_spawning(&input.mob_players);
                     sim.tick();

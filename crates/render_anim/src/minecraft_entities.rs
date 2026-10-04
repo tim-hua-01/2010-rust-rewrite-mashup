@@ -65,6 +65,8 @@ pub(crate) struct Entities {
     seed: i64,
     /// The match's difficulty (`parse_difficulty`).
     difficulty: Difficulty,
+    /// Whether the world has mobs (off in multiplayer for now).
+    mobs: bool,
     /// `LivingEntity.invulnerableTime` and `lastHurt`: after a hit the player
     /// takes no more for ten ticks unless it is harder, and then only the
     /// difference, so a slime touching them every tick hurts twice a second.
@@ -147,9 +149,10 @@ fn scaled_damage(damage: f32, difficulty: Difficulty) -> f32 {
 }
 
 impl Entities {
-    pub(crate) fn new(stream: &TerrainStream, seed: i64, difficulty: Difficulty) -> Self {
+    pub(crate) fn new(stream: &TerrainStream, seed: i64, difficulty: Difficulty, mobs: bool) -> Self {
         let sim = ServerSim::new(stream.world_gen(), stream.states.clone(), "minecraft:overworld");
         let mut server = ServerHandle::spawn(sim);
+        server.set_mobs(mobs);
         // Mob and block loot and the recipes (stack sizes), from the game's
         // data JAR when MinecraftOSS has one.
         let jar = data_jar();
@@ -193,6 +196,7 @@ impl Entities {
             loot_sequences: HashMap::new(),
             seed,
             difficulty,
+            mobs,
             invulnerable_ticks: 0,
             last_hurt: 0.0,
             sounds: Vec::new(),
@@ -477,7 +481,7 @@ impl Entities {
                 bright_outside,
                 tracking: (player.feet, 160.0),
                 player_hurts: Vec::new(),
-                spawn_mobs: true,
+                spawn_mobs: self.mobs,
             });
         }
         let mut changes = Vec::new();

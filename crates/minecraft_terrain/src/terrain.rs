@@ -1037,7 +1037,10 @@ impl TerrainStream {
         let (world_spawn, player_spawn) = match dimension {
             Dimension::Overworld => {
                 let world_spawn = spawn::world_spawn(&mut server);
-                (world_spawn, spawn::player_spawn(&mut server, world_spawn, spawn::DEFAULT_RESPAWN_RADIUS, unseeded()))
+                // The first spawn's offset follows the seed, so every peer
+                // building this world searches (and generates) alike.
+                let offset = (seed as u64 ^ (seed as u64 >> 32)) as u32;
+                (world_spawn, spawn::player_spawn(&mut server, world_spawn, spawn::DEFAULT_RESPAWN_RADIUS, offset))
             }
             Dimension::Nether => {
                 let (x, y, z) = nether_spawn(&mut server);

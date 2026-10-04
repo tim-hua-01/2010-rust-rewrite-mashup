@@ -116,6 +116,16 @@ struct Runtime {
     restore: Option<crate::minecraft_saves::SaveMeta>,
     /// The player's feet in block space, as of the last frame.
     last_feet: Option<[f64; 3]>,
+    /// A client waits for the host's world settings (`mc_*` server info)
+    /// before it can load the world.
+    awaiting_settings: bool,
+    /// The match's world settings once known: chosen on the host, received
+    /// on a client.
+    settings: Option<WorldSettings>,
+    /// The spawn's ground is loaded and in collision: the player may join.
+    ready: bool,
+    /// The spawn chunk's block-state checksum, once generated.
+    spawn_check: Option<u64>,
     /// The heart sprites (`hearts_image`), once the world's packs are in.
     hearts: Option<Handle<Image>>,
     world: Option<Loaded>,
@@ -344,12 +354,14 @@ fn update(
     ),
     mut view: ResMut<MinecraftWorldView>,
     mut runtime: NonSendMut<Runtime>,
-    (skate, cameras, gamepads, active_pad, rules): (
+    (skate, cameras, gamepads, active_pad, rules, prediction, master): (
         Res<frame::SkateMode>,
         Query<&Transform, With<render_scene::FlyCamera>>,
         Query<&bevy::input::gamepad::Gamepad>,
         Option<Res<frame::ActivePad>>,
         Option<Res<frame::HostMatchRules>>,
+        Option<Res<net::ClientPredictionState>>,
+        Option<Res<net::MasterBridge>>,
     ),
     (mut world_commands, mut reports, mut exec): (
         MessageReader<frame::McWorldCommand>,
@@ -364,19 +376,50 @@ fn update(
     for _ in torn_down.read() {
         stop(&mut runtime, &mut view);
     }
-    ui.loading_world = runtime.loading.is_some();
+    // Until the spawn's ground is in collision (on a client, until the host's
+    // settings have arrived and the world is built from them).
+    ui.loading_world = view.active && !runtime.ready;
     for match_ in installed.read() {
         stop(&mut runtime, &mut view);
         if assets::minecraft_map::is_minecraft(&match_.zone) {
+            view.active = true;
+            if authority.is_none() {
+                // A client builds the world the host describes.
+                runtime.awaiting_settings = true;
+                diag::info!(World, "Minecraft world: waiting for the host's world settings");
+                continue;
+            }
             let loading_save = runtime.pending_load.take();
             let seed = loading_save.as_ref().map_or_else(seed, |(meta, _)| meta.seed);
-            let rule = rules.as_ref().and_then(|rules| {
-                rules
-                    .0
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case("scr_mc_difficulty"))
-                    .map(|(_, value)| value.clone())
-            });
+            let host_rule = |wanted: &str| {
+                rules.as_ref().and_then(|rules| {
+                    rules
+                        .0
+                        .iter()
+                        .find(|(name, _)| name.eq_ignore_ascii_case(wanted))
+                        .map(|(_, value)| value.clone())
+                })
+            };
+            let rule = host_rule("scr_mc_difficulty");
+            // The border's half width in blocks (0: none), and the mobs:
+            // auto is off in a lobby hosted for others, on alone.
+            let border = host_rule("scr_mc_border")
+                .or_else(|| std::env::var("IW4L_MINECRAFT_BORDER").ok())
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .unwrap_or(0.0)
+                .max(0.0);
+            let hosting = master
+                .as_ref()
+                .is_some_and(|m| matches!(m.state(), net::MasterBridgeState::Hosting { .. }));
+            let mobs = match host_rule("scr_mc_mobs")
+                .or_else(|| std::env::var("IW4L_MINECRAFT_MOBS").ok())
+                .as_deref()
+                .map(str::trim)
+            {
+                Some("1" | "on") => true,
+                Some("0" | "off") => false,
+                _ => !hosting,
+            };
             // A loaded save keeps its own difficulty.
             let saved = loading_save.as_ref().map(|(meta, _)| meta.difficulty.clone());
             let difficulty = crate::minecraft_entities::parse_difficulty(
@@ -386,7 +429,8 @@ fn update(
                     .as_deref(),
             );
             runtime.difficulty = Some(difficulty);
-            diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}");
+            runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, difficulty, check: None });
+            diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
             runtime.restore = loading_save.map(|(meta, _)| meta);
             let (send, receive) = mpsc::channel();
@@ -396,12 +440,28 @@ fn update(
                     let _ = send.send(load(seed, world_dir));
                 });
             runtime.loading = Some(receive);
-            view.active = true;
         }
     }
-    let Some(mut authority) = authority else {
-        return;
-    };
+    let mut authority = authority;
+
+    // A client loads once the host's settings arrive with a snapshot.
+    if runtime.awaiting_settings
+        && let Some(settings) =
+            presented.snapshot().and_then(|s| WorldSettings::from_server_info(&s.meta.objectives.server_info))
+    {
+        runtime.awaiting_settings = false;
+        runtime.difficulty = Some(settings.difficulty);
+        runtime.settings = Some(settings);
+        diag::info!(World, "Minecraft world: host's settings {settings:?}");
+        let (send, receive) = mpsc::channel();
+        let seed = settings.seed;
+        let _ = std::thread::Builder::new()
+            .name("minecraft-world-load".into())
+            .spawn(move || {
+                let _ = send.send(load(seed, None));
+            });
+        runtime.loading = Some(receive);
+    }
 
     if let Some(receive) = &runtime.loading
         && let Ok(result) = receive.try_recv()
@@ -414,8 +474,15 @@ fn update(
                 if let Some(meta) = &runtime.restore {
                     world.stream.player_spawn = (meta.feet[0], meta.feet[1], meta.feet[2]);
                 }
+                // A client stands its world where the host's does.
+                if let Some([x, y, z]) = runtime.settings.and_then(|s| s.origin) {
+                    world.stream.player_spawn = (x, y, z);
+                }
                 let (x, y, z) = world.stream.player_spawn;
                 view.origin = [x, y, z];
+                if let Some(settings) = runtime.settings.as_mut() {
+                    settings.origin = Some(view.origin);
+                }
                 view.atlas = Some(world.atlas.clone());
                 view.celestial = Some(world.celestial.clone());
                 view.crack_texture = Some(world.crack_texture.clone());
@@ -446,6 +513,7 @@ fn update(
                     &world.stream,
                     world.seed,
                     runtime.difficulty.unwrap_or(minecraftoss_player::Difficulty::Normal),
+                    runtime.settings.is_none_or(|s| s.mobs),
                 ));
                 runtime.day = DayCycle::default();
                 // Game ticks since sunrise to start at: 6000 noon, 13000
@@ -472,11 +540,25 @@ fn update(
                 runtime.light_volume_at = None;
                 runtime.cloud_center = None;
                 view.generation += 1;
-                sim::voxel::activate(
-                    authority.0.content().clip_brushes(),
-                    view.origin,
-                    vec![Vec::new()],
+                // Collision against the blocks for whoever traces this
+                // match's brushes here: the authority on the host (whose
+                // prediction shares its content), prediction on a client.
+                let content = match (authority.as_ref(), prediction.as_ref()) {
+                    (Some(authority), _) => Some(authority.0.content()),
+                    (None, Some(prediction)) => Some(prediction.0.world().content()),
+                    (None, None) => None,
+                };
+                if let Some(content) = content {
+                    sim::voxel::activate(content.clip_brushes(), view.origin, vec![Vec::new()]);
+                }
+                sim::voxel::set_border(
+                    runtime
+                        .settings
+                        .filter(|s| s.border > 0.0)
+                        .map(|s| ([view.origin[0].floor() + 0.5, view.origin[2].floor() + 0.5], s.border)),
                 );
+                runtime.ready = false;
+                runtime.spawn_check = None;
                 diag::info!(
                     World,
                     "Minecraft world ready: seed {} spawn {:?}",
@@ -517,6 +599,9 @@ fn update(
         steps,
         last_feet,
         hearts,
+        settings,
+        ready,
+        spawn_check,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -525,31 +610,36 @@ fn update(
         puppet.active = false;
         return;
     };
-    let Some(ps) = presented.player(local.0) else {
-        ui.active = false;
-        puppet.active = false;
-        return;
-    };
+    let ps = presented.player(local.0);
 
     // Every spawn lands on the Minecraft spawn once its ground exists.
-    let alive = ps.pm_type == 0;
     let spawn_chunk = ((origin[0].floor() as i32) >> 4, (origin[2].floor() as i32) >> 4);
-    if alive && !*was_alive && world.scene.generated_chunk(spawn_chunk).is_some() {
-        // Retried each frame until the authority has the player to move.
-        if authority.0.teleport(local.0, [0.0, 0.0, 0.0]) {
-            diag::info!(World, "Minecraft spawn: moved to the world spawn");
-            *was_alive = true;
+    let alive = ps.is_some_and(|ps| ps.pm_type == 0);
+    if let Some(authority) = authority.as_mut() {
+        if alive && !*was_alive && world.scene.generated_chunk(spawn_chunk).is_some() {
+            // Retried each frame until the authority has the player to move.
+            if authority.0.teleport(local.0, [0.0, 0.0, 0.0]) {
+                diag::info!(World, "Minecraft spawn: moved to the world spawn");
+                *was_alive = true;
+            }
+        } else if !alive {
+            *was_alive = false;
         }
-    } else if !alive {
-        *was_alive = false;
     }
 
-    let feet = sim::voxel::to_block(origin, ps.origin);
-    *last_feet = Some(feet);
+    let feet = ps.map(|ps| sim::voxel::to_block(origin, ps.origin));
+    if feet.is_some() {
+        *last_feet = feet;
+    }
+    // A host with a border keeps the whole arena loaded around its centre,
+    // so every player inside it has ground; otherwise the world streams
+    // around the local player, or the spawn until there is one.
+    let arena = authority.is_some() && settings.is_some_and(|s| s.border > 0.0);
+    let centre = feet.filter(|_| !arena).unwrap_or(origin);
     let block = (
-        feet[0].floor() as i32,
-        feet[1].floor() as i32,
-        feet[2].floor() as i32,
+        centre[0].floor() as i32,
+        centre[1].floor() as i32,
+        centre[2].floor() as i32,
     );
     let (loaded, forgotten) = world.stream.server_tick(block, &mut world.scene);
     for chunk in loaded {
@@ -608,6 +698,52 @@ fn update(
         }
     }
 
+    // The base world's identity: the spawn chunk's blocks, which the host
+    // publishes and a client checks against its own.
+    if spawn_check.is_none()
+        && let Some(chunk) = world.scene.generated_chunk(spawn_chunk)
+    {
+        let check = chunk_checksum(chunk);
+        *spawn_check = Some(check);
+        match settings.as_mut() {
+            Some(settings) if authority.is_some() => settings.check = Some(check),
+            Some(settings) => match settings.check {
+                Some(host) if host != check => {
+                    diag::error!(
+                        World,
+                        "Minecraft world MISMATCH: the host's spawn chunk is {host:016x}, this machine generated {check:016x}; the terrain will differ"
+                    );
+                    reports.write(frame::McWorldReport(
+                        "WARNING: this machine's Minecraft terrain differs from the host's".to_owned(),
+                    ));
+                }
+                Some(_) => diag::info!(World, "Minecraft world: spawn chunk matches the host ({check:016x})"),
+                None => {}
+            },
+            None => {}
+        }
+    }
+    *ready = spawn_check.is_some();
+
+    // The host tells clients which world to build (`mc_*` server info).
+    if let (Some(authority), Some(settings)) = (authority.as_mut(), settings.as_ref()) {
+        settings.publish(&mut authority.0, day.ticks);
+    } else if let Some(host_ticks) = presented
+        .snapshot()
+        .and_then(|s| s.meta.objectives.server_info("mc_time"))
+        .and_then(|t| t.parse::<f64>().ok())
+        && (host_ticks - day.ticks).abs() > 100.0
+    {
+        // A client's sky follows the host's clock.
+        day.set(host_ticks);
+    }
+
+    let Some(ps) = ps else {
+        ui.active = false;
+        puppet.active = false;
+        return;
+    };
+    let feet = feet.unwrap_or(origin);
     // Minecraft's yaw: 0 facing +Z (map -Y), turning towards -X.
     let yaw_rad = ps.viewangles[1].to_radians();
     let mc_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
@@ -688,9 +824,12 @@ fn update(
     hand.clock += dt_hand;
     let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
     hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
+    // Mining and placing by hand stay the host's until clients can ask it
+    // to (their edits would only change their own copy of the world).
     if let Some(entities) = entities.as_mut()
         && ui.holding_item
         && !ui.inventory_open
+        && authority.is_some()
     {
         let mut player = minecraftoss_player::Player::new(glam::DVec3::from_array(feet));
         player.yaw = f64::from(mc_yaw);
@@ -954,7 +1093,14 @@ fn update(
             .iter()
             .filter(|&&w| w > 0)
             .map(|&w| w as u32)
-            .filter(|&w| authority.0.weapon_combat_row(w).is_some_and(|facts| facts.inventory_type == 0))
+            .filter(|&w| {
+                let facts = match (authority.as_ref(), prediction.as_ref()) {
+                    (Some(authority), _) => authority.0.weapon_combat_row(w),
+                    (None, Some(prediction)) => prediction.0.world().weapon_combat_row(w),
+                    (None, None) => None,
+                };
+                facts.is_some_and(|facts| facts.inventory_type == 0)
+            })
             .collect();
         ui.active = alive;
         if !alive {
@@ -1190,6 +1336,10 @@ fn update(
 }
 
 fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
+    runtime.awaiting_settings = false;
+    runtime.settings = None;
+    runtime.ready = false;
+    runtime.spawn_check = None;
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();
         view.active = false;
@@ -1289,4 +1439,71 @@ fn world_command(
             Err(error) => report(format!("mc_load: {error}")),
         },
     }
+}
+
+/// What a Minecraft match's world is, chosen on the host and published to
+/// clients as `mc_*` server info so they build the same one.
+#[derive(Clone, Copy, Debug)]
+struct WorldSettings {
+    seed: i64,
+    /// The block point at map origin, once the host's world is in.
+    origin: Option<[f64; 3]>,
+    /// The world border's half width in blocks; 0 is none.
+    border: f64,
+    mobs: bool,
+    difficulty: minecraftoss_player::Difficulty,
+    /// The host's spawn-chunk checksum (`chunk_checksum`).
+    check: Option<u64>,
+}
+
+impl WorldSettings {
+    fn publish(&self, sim: &mut sim::SimWorld, day_ticks: f64) {
+        let Some([x, y, z]) = self.origin else {
+            return;
+        };
+        sim.set_server_info("mc_seed", &self.seed.to_string());
+        sim.set_server_info("mc_origin", &format!("{x} {y} {z}"));
+        sim.set_server_info("mc_border", &self.border.to_string());
+        sim.set_server_info("mc_mobs", if self.mobs { "1" } else { "0" });
+        sim.set_server_info("mc_difficulty", &format!("{:?}", self.difficulty).to_ascii_lowercase());
+        sim.set_server_info("mc_time", &(day_ticks.round() as i64).to_string());
+        if let Some(check) = self.check {
+            sim.set_server_info("mc_check", &format!("{check:016x}"));
+        }
+    }
+
+    fn from_server_info(info: &[(String, String)]) -> Option<Self> {
+        let get = |name: &str| info.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str());
+        let seed = get("mc_seed")?.parse().ok()?;
+        let origin: Vec<f64> = get("mc_origin")?.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        let [x, y, z] = origin[..] else {
+            return None;
+        };
+        Some(Self {
+            seed,
+            origin: Some([x, y, z]),
+            border: get("mc_border").and_then(|v| v.parse().ok()).unwrap_or(0.0),
+            mobs: get("mc_mobs") == Some("1"),
+            difficulty: crate::minecraft_entities::parse_difficulty(get("mc_difficulty")),
+            check: get("mc_check").and_then(|v| u64::from_str_radix(v, 16).ok()),
+        })
+    }
+}
+
+/// FNV-1a over a chunk's block states: the same on every machine that
+/// generated the same chunk.
+fn chunk_checksum(chunk: &minecraftoss_core::Chunk) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let (min_y, height) = (chunk.min_y(), chunk.height());
+    for y in min_y..min_y + height {
+        for z in 0..16 {
+            for x in 0..16 {
+                for byte in chunk.block(x, y, z).0.to_le_bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+        }
+    }
+    hash
 }

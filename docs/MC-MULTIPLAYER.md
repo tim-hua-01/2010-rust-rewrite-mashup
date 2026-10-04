@@ -581,3 +581,42 @@ currently forces those limits to zero in `crates/session/src/match_apply.rs`.
 For v1, explicitly choose whether Minecraft killcams and demos are disabled
 or accepted with current terrain; accurate historical terrain needs edit
 replay. These choices should be stated before calling the PvP milestone done.
+
+---
+
+## Finding (2026-10-04): base terrain is not deterministic
+
+Measured with `cargo run --profile play -p minecraft_terrain --example
+determinism -- iw4l-artifacts/minecraft-26.3 <seed> <runs> <radius>`, which
+generates one seed several times and checksums every chunk around a fixed
+point:
+
+| Setup | Chunks differing (49, radius 3, 4 runs) |
+| --- | --- |
+| default threads, streaming | 41 |
+| 1 generation thread, streaming | 12–37 |
+| 1 thread, pre-generated in a fixed order, seeded spawn search | 37 |
+
+The differences are feature decorations that span chunk borders (lush-cave
+moss, grass, azalea, dripleaf; some deepslate/clay). Even single-threaded in a
+fixed order the output varies, so it is not only thread scheduling; something
+in MinecraftOSS's generation depends on per-run state. A two-window duo run
+also caught it live (`mc_check` mismatch).
+
+**Consequence:** D1's "every peer generates the same terrain from the seed" does
+not hold. Peers would walk on different blocks (collision disagreement).
+
+**Options:**
+
+1. **Host sends the arena's terrain** (recommended). With a border the arena is
+   bounded (64-block half width ≈ 9×9 chunks); the host serializes those chunks'
+   block states (palette + zstd, a few KB per chunk, roughly 0.3–0.6 MB) and
+   streams them to joiners over the reliable lane with flow control, before
+   edits. Outside the border clients may generate their own scenery (cosmetic
+   only, never collided with). Works for replicas, saves and Windows alike, and
+   reuses the join-transfer machinery Phase 2 needs anyway (F1, F3).
+2. **Make MinecraftOSS generation deterministic.** Unknown effort: find the
+   per-run state in feature placement and cross-chunk decoration. Vanilla
+   Minecraft is itself generation-order dependent.
+
+The spawn-chunk checksum (`mc_check`) stays as a safety net either way.

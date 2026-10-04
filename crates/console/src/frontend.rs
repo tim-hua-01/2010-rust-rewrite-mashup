@@ -145,6 +145,12 @@ pub(crate) fn route(
     if dvars.get("scr_mc_difficulty").is_none() {
         dvars.set("scr_mc_difficulty", "2");
     }
+    if dvars.get("scr_mc_border").is_none() {
+        dvars.set("scr_mc_border", "64");
+    }
+    if dvars.get("scr_mc_mobs").is_none() {
+        dvars.set("scr_mc_mobs", "auto");
+    }
     if dvars.get("ui_gametype").is_none() {
         dvars.set(
             "ui_gametype",

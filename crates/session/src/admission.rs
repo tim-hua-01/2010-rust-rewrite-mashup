@@ -31,11 +31,16 @@ pub fn update_admission(
     let skate_ready =
         *role != RuntimeRole::Listen || skate.is_none_or(|skate| !skate.preload_pending);
     let minecraft_ready = minecraft.is_none_or(|ui| !ui.loading_world);
+    // A client builds its Minecraft world from settings the host sends with
+    // its snapshots, which only flow once the client has reported the map
+    // loaded; so a client reports without it, and waits for it at class
+    // select instead.
+    let client = *role == RuntimeRole::Client;
     let presentation_ready = headless.is_some()
         || (scene.is_some_and(|scene| scene.spawned)
             && audio_ready
             && skate_ready
-            && minecraft_ready);
+            && (minecraft_ready || client));
     if presentation_ready && let Some(live) = live.as_ref() {
         admission.core.apply_presentation(live.load_key);
     }
@@ -45,7 +50,7 @@ pub fn update_admission(
         .core
         .apply_local_authority_ready(authority_ready && world_installed);
     let admitted = match *role {
-        RuntimeRole::Client => admission.core.class_select_allowed(),
+        RuntimeRole::Client => admission.core.class_select_allowed() && minecraft_ready,
         RuntimeRole::Listen | RuntimeRole::Dedicated => admission.core.local_class_select_allowed(),
         RuntimeRole::Replay => presentation_ready,
     };
