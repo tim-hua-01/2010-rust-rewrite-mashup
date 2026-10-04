@@ -243,7 +243,9 @@ fn install_minecraft_controls(catalog: &mut asset_game::MenuCatalog) {
 }
 
 /// Game Setup's MINECRAFT DIFFICULTY row: a host rule, `scr_mc_difficulty`,
-/// that the Minecraft world reads when the match installs.
+/// that the Minecraft world reads when the match installs. It is a button
+/// like its neighbours whose text names the choice; the popup's panel grows
+/// to hold it and the password row, which retail's four-row panel left out.
 fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
     let Some(setup) = catalog.menus.get_mut("lobby_game_setup") else {
         return;
@@ -256,28 +258,28 @@ fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
         if item.item_type == 1 && item.rect.x == template.rect.x && item.rect.y >= row {
             item.rect.y += 20.0;
         }
+        // The panel and its shadow are `24 + rows * 20` tall.
+        for (_, expression) in &mut item.float_exp {
+            *expression = expression.replace("op 16 4 op 1 op 2 20", "op 16 6 op 1 op 2 20");
+        }
     }
-    let mut label = template.clone();
-    label.name = "mc_difficulty_label".into();
-    label.item_type = 0;
-    label.text_key = "MINECRAFT DIFFICULTY".into();
-    label.text_literal = true;
-    label.dvar.clear();
-    label.handlers = Default::default();
-    label.background.clear();
+    for (_, expression) in &mut setup.float_exp {
+        if let Ok(height) = expression.parse::<f32>()
+            && height >= 140.0
+        {
+            *expression = (height + 20.0).to_string();
+        }
+    }
     let mut choice = template;
     choice.name = "mc_difficulty".into();
     choice.item_type = 12;
     choice.dvar = "scr_mc_difficulty".into();
     choice.choices = [("PEACEFUL", "0"), ("EASY", "1"), ("NORMAL", "2"), ("HARD", "3")]
-        .map(|(text, value)| (text.to_owned(), value.to_owned()))
+        .map(|(level, value)| (format!("MINECRAFT DIFFICULTY: {level}"), value.to_owned()))
         .to_vec();
     choice.text_key.clear();
     choice.text_exp.clear();
-    choice.text_align_mode = 10;
-    choice.text_align_x = -8.0;
     choice.handlers.action = vec![asset_game::MenuEvent::Script("play mouse_click;".into())];
-    setup.items.push(label);
     setup.items.push(choice);
 }
 
