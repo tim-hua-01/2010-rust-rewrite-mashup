@@ -12,6 +12,7 @@ cd ~/Documents/funprojs/2010-rust-rewrite-mashup
 ./target/play/iw4l menu                       # main menu
 ./target/play/iw4l map minecraft:overworld    # straight into the Minecraft world
 ./target/play/iw4l map mp_rust                # straight into an MW2 map
+./target/play/iw4l map minecraft:village      # the biggest village near spawn, walled in
 ./target/play/iw4l map minecraft:rust         # Rust rebuilt in blocks
 ./target/play/iw4l map minecraft:terminal     # Terminal rebuilt in blocks
 ```

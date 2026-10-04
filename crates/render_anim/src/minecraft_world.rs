@@ -78,8 +78,8 @@ struct Loaded {
     celestial: Arc<image::RgbaImage>,
     cloud_mask: Option<CloudMask>,
     crack_texture: Arc<image::RgbaImage>,
-    /// A replica's half width in blocks, for its border.
-    replica_half_width: Option<f64>,
+    /// A replica's or village's half width in blocks, for its border.
+    arena_half_width: Option<f64>,
 }
 
 /// The hand's swing and the timers of mining and placing by hand.
@@ -266,7 +266,14 @@ enum Built {
     Flat(i32),
     /// The stand-in MW2 map's geometry, voxelized.
     Replica(Arc<sim::SimContent>),
+    /// The generated world around its biggest village near the spawn.
+    Village,
 }
+
+/// How far from the world spawn a village arena looks, in blocks.
+const VILLAGE_RANGE: i32 = 2048;
+/// Blocks of open ground kept between a village's bounds and the border.
+const VILLAGE_MARGIN: i32 = 12;
 
 fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built: Option<Built>) -> Result<Loaded, String> {
     let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
@@ -288,7 +295,25 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built:
     let mut stream = stream;
     // A built arena: the host makes its chunks and shows only those, with
     // the spawn standing on the new ground.
-    let mut replica_half_width = None;
+    let mut arena_half_width = None;
+    if let Some(Built::Village) = &built {
+        let started = std::time::Instant::now();
+        match stream.biggest_village(VILLAGE_RANGE) {
+            Some(village) => {
+                stream.respawn_around(village.centre);
+                let half = (village.half_extent + VILLAGE_MARGIN).clamp(40, 128);
+                diag::info!(
+                    World,
+                    "Minecraft village: {} pieces at {:?}, border {half}, found in {:.1}s",
+                    village.pieces,
+                    village.centre,
+                    started.elapsed().as_secs_f64()
+                );
+                arena_half_width = Some(f64::from(half) - 2.0);
+            }
+            None => diag::warn!(World, "Minecraft village: none within {VILLAGE_RANGE} blocks of the spawn; playing around the spawn"),
+        }
+    }
     if let Some(Built::Replica(content)) = &built {
         let (sx, sy, sz) = stream.player_spawn;
         let origin = [sx, sy, sz];
@@ -313,7 +338,7 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built:
             (2 * radius + 1).pow(2),
             started.elapsed().as_secs_f64()
         );
-        replica_half_width = Some(voxels.half_width);
+        arena_half_width = Some(voxels.half_width);
     }
     if let Some(Built::Flat(radius)) = built {
         let (sx, sy, sz) = stream.player_spawn;
@@ -345,7 +370,7 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built:
         celestial,
         cloud_mask,
         crack_texture,
-        replica_half_width,
+        arena_half_width,
     })
 }
 
@@ -532,23 +557,27 @@ fn update(
             };
             // A replica map is its replica; the generated world takes Game
             // Setup's MINECRAFT WORLD.
-            let kind = if assets::minecraft_map::is_replica(&match_.zone) {
-                WorldKind::Replica
-            } else {
-                WorldKind::parse(
+            let kind = match assets::minecraft_map::world_kind(&match_.zone) {
+                Some(kind) => WorldKind::parse(kind),
+                None => WorldKind::parse(
                     &std::env::var("IW4L_MINECRAFT_WORLD").ok().or_else(|| host_rule("scr_mc_world")).unwrap_or_default(),
-                )
+                ),
             };
             // Mobs live in the generated terrain, which a built arena replaces.
-            let mobs = mobs && kind == WorldKind::Natural;
+            let mobs = mobs && matches!(kind, WorldKind::Natural | WorldKind::Village);
             let content = authority.as_ref().map(|authority| authority.0.content());
             let built = match (kind, content) {
                 (WorldKind::Flat, _) => Some(Built::Flat(arena_radius(border))),
                 (WorldKind::Replica, Some(content)) => Some(Built::Replica(content)),
+                // Only the host searches: a client stands where it's told.
+                (WorldKind::Village, Some(_)) => Some(Built::Village),
                 _ => None,
             };
             // A replica's own spawn points and size decide the arena.
-            let view_distance_floor = if kind == WorldKind::Replica { 12 } else { 0 };
+            let view_distance_floor = match kind {
+                WorldKind::Replica | WorldKind::Village => 12,
+                _ => 0,
+            };
             runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, kit, kind, difficulty, check: None });
             diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
@@ -639,7 +668,7 @@ fn update(
                 view.origin = [x, y, z];
                 if let Some(settings) = runtime.settings.as_mut() {
                     settings.origin = Some(view.origin);
-                    if let Some(half) = world.replica_half_width {
+                    if let Some(half) = world.arena_half_width {
                         settings.border = half.ceil() + 2.0;
                     }
                 }
@@ -2047,6 +2076,8 @@ enum WorldKind {
     Flat,
     /// The stand-in MW2 map voxelized, built by the host.
     Replica,
+    /// Seeded generation around its biggest village near the spawn.
+    Village,
 }
 
 impl WorldKind {
@@ -2054,6 +2085,7 @@ impl WorldKind {
         match name.trim() {
             "flat" => Self::Flat,
             "replica" => Self::Replica,
+            "village" => Self::Village,
             _ => Self::Natural,
         }
     }
@@ -2063,6 +2095,7 @@ impl WorldKind {
             Self::Natural => "natural",
             Self::Flat => "flat",
             Self::Replica => "replica",
+            Self::Village => "village",
         }
     }
 }

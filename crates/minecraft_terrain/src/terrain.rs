@@ -898,6 +898,17 @@ struct Stats {
     compile_micros: u64,
 }
 
+/// A generated village, found by `TerrainStream::biggest_village`.
+#[derive(Clone, Copy, Debug)]
+pub struct Village {
+    /// Block column at the centre of its bounds.
+    pub centre: (i32, i32),
+    /// Half its longer side, in blocks.
+    pub half_extent: i32,
+    /// Its jigsaw pieces: houses, roads, the well.
+    pub pieces: usize,
+}
+
 /// The integrated server's chunk map and the client's section rendering.
 pub struct TerrainStream {
     pub states: Arc<BlockStates>,
@@ -1167,6 +1178,55 @@ impl TerrainStream {
                 self.server.load_now(minecraftoss_core::ChunkPos { x: cx + dx, z: cz + dz });
             }
         }
+    }
+
+    /// The generated village with the most pieces among those starting
+    /// within `range` blocks of the world spawn.
+    pub fn biggest_village(&self, range: i32) -> Option<Village> {
+        let worldgen = self.server.world_gen().clone();
+        let structures = &worldgen.structures;
+        let set = structures.sets().iter().position(|s| s.name == "minecraft:villages")?;
+        let kinds: Vec<_> = structures.sets()[set].structures.iter().map(|(id, _)| *id).collect();
+        let placement = structures.placement(set);
+        let (sx, sz) = (self.world_spawn.0, self.world_spawn.2);
+        let mut seen = HashSet::new();
+        let mut best: Option<Village> = None;
+        // Villages sit one to a 34-chunk grid cell: probing every 8 chunks
+        // reaches each cell's candidate.
+        for x in ((sx - range) >> 4..=(sx + range) >> 4).step_by(8) {
+            for z in ((sz - range) >> 4..=(sz + range) >> 4).step_by(8) {
+                let Some(chunk) = placement.potential_chunk(structures.seed(), x, z) else { continue };
+                if !seen.insert((chunk.x, chunk.z)) || !structures.is_structure_chunk(&worldgen.terrain, set, chunk) {
+                    continue;
+                }
+                for start in structures.starts_in(&worldgen.library, &worldgen.terrain, chunk).iter() {
+                    if !kinds.contains(&start.structure) {
+                        continue;
+                    }
+                    let bbox = start.bounding_box();
+                    let centre = ((bbox.min_x + bbox.max_x) / 2, (bbox.min_z + bbox.max_z) / 2);
+                    if (centre.0 - sx).abs().max((centre.1 - sz).abs()) > range {
+                        continue;
+                    }
+                    let village = Village {
+                        centre,
+                        half_extent: (bbox.max_x - bbox.min_x).max(bbox.max_z - bbox.min_z) / 2,
+                        pieces: start.piece_count(),
+                    };
+                    if best.as_ref().is_none_or(|b| village.pieces > b.pieces) {
+                        best = Some(village);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Moves the world spawn to a block column and finds the player spawn
+    /// around it again.
+    pub fn respawn_around(&mut self, (x, z): (i32, i32)) {
+        self.world_spawn = (x, self.world_spawn.1, z);
+        self.player_spawn = spawn::player_spawn(&mut self.server, self.world_spawn, spawn::DEFAULT_RESPAWN_RADIUS, 0);
     }
 
     /// `PlayerSpawnFinder.findSpawn` again, for a respawn.

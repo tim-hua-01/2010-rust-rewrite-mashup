@@ -380,6 +380,11 @@ impl Structures {
         &self.sets
     }
 
+    /// The world seed placements are drawn from.
+    pub fn seed(&self) -> i64 {
+        self.seed
+    }
+
     pub fn placement(&self, set: usize) -> &Placement {
         &self.placements[set]
     }

@@ -7,15 +7,17 @@ pub const ZONE: &str = "minecraft:overworld";
 /// The map whose level script the generated Minecraft world runs.
 pub const PROXY_MAP: &str = "mp_rust";
 
-/// The Minecraft maps: the generated world, and replicas of MW2 maps built
-/// from the map each stands on (its zone, and whether it's a replica).
-const WORLDS: [(&str, &str, bool); 3] = [
-    (ZONE, "mp_rust", false),
-    ("minecraft:rust", "mp_rust", true),
-    ("minecraft:terminal", "mp_terminal", true),
+/// The Minecraft maps: the generated world, a village in it, and replicas of
+/// MW2 maps built from the map each stands on (its zone, and the world kind
+/// the map fixes, if any).
+const WORLDS: [(&str, &str, Option<&str>); 4] = [
+    (ZONE, "mp_rust", None),
+    ("minecraft:village", "mp_rust", Some("village")),
+    ("minecraft:rust", "mp_rust", Some("replica")),
+    ("minecraft:terminal", "mp_terminal", Some("replica")),
 ];
 
-fn world(zone: &str) -> Option<(&'static str, &'static str, bool)> {
+fn world(zone: &str) -> Option<(&'static str, &'static str, Option<&'static str>)> {
     let zone = zone.trim();
     WORLDS.into_iter().find(|(name, ..)| name.eq_ignore_ascii_case(zone))
 }
@@ -24,9 +26,10 @@ pub fn is_minecraft(zone: &str) -> bool {
     world(zone).is_some()
 }
 
-/// Whether the Minecraft map is a replica of the MW2 map it stands on.
-pub fn is_replica(zone: &str) -> bool {
-    world(zone).or_else(|| zone.split_once(':').and_then(|(_, rest)| world(rest))).is_some_and(|(.., replica)| replica)
+/// The world kind a Minecraft map fixes (`replica`, `village`); the
+/// generated world takes the host's choice.
+pub fn world_kind(zone: &str) -> Option<&'static str> {
+    world(zone).or_else(|| zone.split_once(':').and_then(|(_, rest)| world(rest))).and_then(|(.., kind)| kind)
 }
 
 /// The MW2 map a Minecraft map stands on (its weapons, bodies and level

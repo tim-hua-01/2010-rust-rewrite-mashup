@@ -278,6 +278,7 @@ fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
         ("mc_world", "scr_mc_world", &[
             ("MINECRAFT WORLD: NATURAL", "natural"),
             ("MINECRAFT WORLD: FLAT", "flat"),
+            ("MINECRAFT WORLD: VILLAGE", "village"),
         ]),
         ("mc_limits", "scr_mc_limits", &[
             ("MINECRAFT MATCH: ENDLESS", "endless"),

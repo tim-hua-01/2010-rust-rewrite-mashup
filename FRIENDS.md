@@ -22,8 +22,8 @@ It starts the relay on your Tailscale address, points your game at it, and
 prints what to send each friend: the relay address and `~/.iw4l/ca/iw4l-ca.pem`
 (a public certificate; it lets their game trust your relay). Then
 `./target/play/iw4l menu`, **Create Game**, and in **Game Setup** pick the map
-(Minecraft tab: `overworld`, `rust`, `terminal`), Team Deathmatch or
-Free-for-All, and the Minecraft rows (world border, natural or flat world,
+(Minecraft tab: `overworld`, `village`, `rust`, `terminal`), Team Deathmatch or
+Free-for-All, and the Minecraft rows (world border, natural, flat or village world,
 mobs, blocks). `scripts/mc-host-relay.sh stop` when you're done.
 
 ## Everyone (once)

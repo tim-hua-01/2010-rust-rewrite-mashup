@@ -686,3 +686,12 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   address (Rust replica, TDM): both peers' QUIC handshakes to
   100.x:4433, client spawn chunk matches. Not yet: a session with a friend on
   another machine.
+* **Village (2026-10-04):** `minecraft:village` (and Game Setup MINECRAFT
+  WORLD: VILLAGE) is the generated world around the village with the most
+  jigsaw pieces whose bounds centre within 2048 blocks of the world spawn
+  (`TerrainStream::biggest_village`; probes the villages placement grid and
+  reads each start's pieces and bounds). The host moves the spawn there and
+  sets the border to the village's half extent + 12 (40..128). 26 of 26 seeds
+  surveyed have one in range (2 of 26 within 1024). Duo verified: 239-piece
+  village, border 96, the client's spawn chunk matches. Only the host
+  searches; clients stand where the settings say.
