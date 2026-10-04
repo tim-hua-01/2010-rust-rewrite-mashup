@@ -136,6 +136,10 @@ struct Runtime {
     /// edits), and the next live sequence expected.
     edits_waiting: Vec<(u32, Vec<frame::McEdit>)>,
     next_edit: (u32, u32),
+    /// The building kit was topped up for this life.
+    kit_given: bool,
+    /// A scripted right click (`mc_use`) waiting for the hand.
+    scripted_use: bool,
     /// The heart sprites (`hearts_image`), once the world's packs are in.
     hearts: Option<Handle<Image>>,
     world: Option<Loaded>,
@@ -376,6 +380,12 @@ fn update(
         Option<Res<net::ClientPredictionState>>,
         Option<Res<net::MasterBridge>>,
     ),
+    (mut actions, mut action_ids, mut grants, mut reliable): (
+        ResMut<net::ClientActionInbox>,
+        ResMut<net::ActionRequestIds>,
+        MessageReader<frame::McGrant>,
+        ResMut<net::ReliableEventHub>,
+    ),
     (mut world_commands, mut reports, mut exec, mut chunk_parts, mut terrain, mut edit_log, mut host_edits): (
         MessageReader<frame::McWorldCommand>,
         MessageWriter<frame::McWorldReport>,
@@ -453,7 +463,17 @@ fn update(
                     .as_deref(),
             );
             runtime.difficulty = Some(difficulty);
-            runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, difficulty, check: None });
+            let kit = match std::env::var("IW4L_MINECRAFT_BLOCKS")
+                .ok()
+                .or_else(|| host_rule("scr_mc_blocks"))
+                .as_deref()
+                .map(str::trim)
+            {
+                Some("kit") => true,
+                Some("survival") => false,
+                _ => hosting,
+            };
+            runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, kit, difficulty, check: None });
             diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
             // The host keeps the whole arena loaded around its centre.
@@ -684,6 +704,8 @@ fn update(
         terrain_next,
         edits_waiting,
         next_edit,
+        kit_given,
+        scripted_use,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -999,12 +1021,22 @@ fn update(
     hand.clock += dt_hand;
     let hand_ticks = (hand.clock / TICK_SECONDS) as u32;
     hand.clock -= f64::from(hand_ticks) * TICK_SECONDS;
-    // Mining and placing by hand stay the host's until clients can ask it
-    // to (their edits would only change their own copy of the world).
+    // Mining by hand stays the host's; a client places by asking the host
+    // (`ClientAction::McPlace`), its world changing when the edit comes back.
+    let host = authority.is_some();
+    let players: Vec<[f64; 3]> = presented
+        .snapshot()
+        .map(|s| {
+            s.players
+                .iter()
+                .filter(|(_, p)| p.pm_type == 0)
+                .map(|(_, p)| sim::voxel::to_block(origin, p.origin))
+                .collect()
+        })
+        .unwrap_or_default();
     if let Some(entities) = entities.as_mut()
         && ui.holding_item
         && !ui.inventory_open
-        && authority.is_some()
     {
         let mut player = minecraftoss_player::Player::new(glam::DVec3::from_array(feet));
         player.yaw = f64::from(mc_yaw);
@@ -1015,11 +1047,11 @@ fn update(
             let (yaw, pitch) = (f64::from(mc_yaw).to_radians(), f64::from(ps.viewangles[0]).to_radians());
             glam::DVec3::new(-yaw.sin() * pitch.cos(), -pitch.sin(), yaw.cos() * pitch.cos())
         };
-        if buttons.just_pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, true) {
+        if host && (buttons.just_pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, true)) {
             hand.swing = Some(0.0);
             entities.punch(eye_block, look, mc_yaw);
         }
-        if buttons.pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, false) {
+        if host && (buttons.pressed(MouseButton::Left) || pad_trigger(pad, GamepadButton::RightTrigger2, false)) {
             for _ in 0..hand_ticks {
                 if let Some(hit) = player.target(&world.scene, 4.5) {
                     // A hand mines as vanilla's `getDestroyProgress`: a
@@ -1036,8 +1068,24 @@ fn update(
         }
         hand.place_delay = hand.place_delay.saturating_sub(hand_ticks);
         let place = (buttons.just_pressed(MouseButton::Right) || pad_trigger(pad, GamepadButton::LeftTrigger2, true))
-            || ((buttons.pressed(MouseButton::Right) || pad_trigger(pad, GamepadButton::LeftTrigger2, false)) && hand.place_delay == 0);
-        if place {
+            || ((buttons.pressed(MouseButton::Right) || pad_trigger(pad, GamepadButton::LeftTrigger2, false)) && hand.place_delay == 0)
+            || std::mem::take(scripted_use);
+        if place && !host {
+            hand.place_delay = 4;
+            // Where the block would go, worked out on a copy of the world.
+            let mut preview = world.scene.clone();
+            if let Some(pos) = player.place_selected(&mut preview, &mut entities.inventory, minecraftoss_player::GameMode::Survival)
+                && let Some(block) = minecraft_terrain::scene::Scene::block(&preview, pos).cloned()
+                && let Some(state) = world.stream.states.state_of(&block)
+            {
+                let request_id = action_ids.allocate();
+                let _ = actions.push(
+                    local.0,
+                    sim::ClientAction::McPlace { request_id, pos: [pos.0, pos.1, pos.2], state: state.0 },
+                );
+                hand.swing = Some(0.0);
+            }
+        } else if place {
             hand.place_delay = 4;
             if let Some(pos) = player.place_selected(
                 &mut world.scene,
@@ -1045,14 +1093,9 @@ fn update(
                 minecraftoss_player::GameMode::Survival,
             ) {
                 changed.push(pos);
-                // Not into the player's own box.
-                let [fx, fy, fz] = feet;
-                let inside = (fx - 0.3) < f64::from(pos.0 + 1)
-                    && (fx + 0.3) > f64::from(pos.0)
-                    && fy < f64::from(pos.1 + 1)
-                    && (fy + 1.8) > f64::from(pos.1)
-                    && (fz - 0.3) < f64::from(pos.2 + 1)
-                    && (fz + 0.3) > f64::from(pos.2);
+                // Not into anyone's box, nor past the border.
+                let inside = block_hits_player(pos, &players) || block_hits_player(pos, &[feet])
+                    || !sim::voxel::inside_border(pos.0, pos.2);
                 let block = minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned();
                 if inside {
                     world.scene.set(pos, None);
@@ -1275,6 +1318,82 @@ fn update(
         }
         for (amount, from) in hits {
             sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
+        }
+        // Items the host gave (a refused placement's block back).
+        for grant in grants.read() {
+            let _ = entities.inventory.add_item(
+                minecraftoss_player::inventory::ItemStack::new(grant.item.clone(), grant.count),
+                entities.selected,
+            );
+        }
+        // The building kit, topped up once each life.
+        if settings.is_some_and(|s| s.kit) {
+            if alive && !*kit_given {
+                for id in KIT {
+                    let have: u32 = entities
+                        .inventory
+                        .slots
+                        .iter()
+                        .flatten()
+                        .filter(|stack| stack.id == id)
+                        .map(|stack| u32::from(stack.count))
+                        .sum();
+                    if have < 64 {
+                        let _ = entities.inventory.add_item(
+                            minecraftoss_player::inventory::ItemStack::new(id, (64 - have) as u8),
+                            entities.selected,
+                        );
+                    }
+                }
+                *kit_given = true;
+            } else if !alive {
+                *kit_given = false;
+            }
+        }
+        // The host applies its clients' placements it can accept, and gives
+        // back the block of each it can't.
+        if host {
+            let snapshot = presented.snapshot();
+            for (client, [x, y, z], state) in sim::voxel::take_place_requests() {
+                let pos = (x, y, z);
+                let block = world.stream.states.block(minecraftoss_core::BlockStateId(state)).cloned();
+                let requester = snapshot.and_then(|s| s.players.iter().find(|(id, _)| id.0 == client)).map(|(_, p)| p);
+                let reach = requester.filter(|p| p.pm_type == 0).is_some_and(|p| {
+                    let eye = sim::voxel::to_block(origin, p.origin);
+                    let d = [f64::from(x) + 0.5 - eye[0], f64::from(y) + 0.5 - (eye[1] + 1.62), f64::from(z) + 0.5 - eye[2]];
+                    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt() <= 7.0
+                });
+                let replaceable = minecraft_terrain::scene::Scene::block(&world.scene, pos).is_none_or(|b| {
+                    matches!(
+                        b.id.path.as_str(),
+                        "water" | "short_grass" | "tall_grass" | "fern" | "large_fern" | "snow" | "seagrass" | "dead_bush"
+                    )
+                });
+                match block {
+                    Some(block)
+                        if reach && replaceable && sim::voxel::inside_border(x, z) && !block_hits_player(pos, &players) =>
+                    {
+                        let shape = shape_for_state(Some(minecraftoss_core::BlockStateId(state)), &world.registries.blocks, shapes, shape_ids);
+                        diag::info!(World, "Minecraft: client {client} placed {} at {pos:?}", block.id.key());
+                        world.scene.set(pos, Some(block));
+                        sim::voxel::set_block_shape(x, y, z, shape);
+                        world.stream.record_edits(&world.scene, &[pos]);
+                        world.stream.mark_edited(&world.scene, &[pos]);
+                        entities.placed(&world.scene, pos);
+                        changed.push(pos);
+                    }
+                    Some(block) => {
+                        diag::info!(
+                            World,
+                            "Minecraft: refused client {client}'s {} at {pos:?} (reach {reach}, replaceable {replaceable}, in a player {})",
+                            block.id.key(),
+                            block_hits_player(pos, &players)
+                        );
+                        reliable.queue_mut(sim::ClientId(client)).push(net::ReliableRow::McGrant { item: block.id.key(), count: 1 });
+                    }
+                    None => {}
+                }
+            }
         }
         // The inventory: MW2 guns as items, the HUD's clicks, the hotbar's
         // gun, and what the HUD shows.
@@ -1623,6 +1742,13 @@ fn world_command(
                 (None, _) => report(format!("mc_time: `{value}` is not day, noon, night, midnight or 0-23999")),
             }
         }
+        frame::McWorldCommand::Slot(slot) => {
+            if let Some(entities) = runtime.entities.as_mut() {
+                entities.selected = usize::from(slot - 1);
+                report(format!("hotbar slot {slot}"));
+            }
+        }
+        frame::McWorldCommand::Use => runtime.scripted_use = true,
         frame::McWorldCommand::Load(name) => match crate::minecraft_saves::prepare_load(name) {
             Ok(save) => {
                 report(format!("loading `{name}` (seed {})", save.0.seed));
@@ -1646,6 +1772,8 @@ struct WorldSettings {
     /// The world border's half width in blocks; 0 is none.
     border: f64,
     mobs: bool,
+    /// Every life starts with a building kit (else blocks come from mining).
+    kit: bool,
     difficulty: minecraftoss_player::Difficulty,
     /// The host's spawn-chunk checksum (`chunk_checksum`).
     check: Option<u64>,
@@ -1660,6 +1788,7 @@ impl WorldSettings {
         sim.set_server_info("mc_origin", &format!("{x} {y} {z}"));
         sim.set_server_info("mc_border", &self.border.to_string());
         sim.set_server_info("mc_mobs", if self.mobs { "1" } else { "0" });
+        sim.set_server_info("mc_blocks", if self.kit { "kit" } else { "survival" });
         sim.set_server_info("mc_difficulty", &format!("{:?}", self.difficulty).to_ascii_lowercase());
         sim.set_server_info("mc_time", &(day_ticks.round() as i64).to_string());
         if let Some(check) = self.check {
@@ -1679,6 +1808,7 @@ impl WorldSettings {
             origin: Some([x, y, z]),
             border: get("mc_border").and_then(|v| v.parse().ok()).unwrap_or(0.0),
             mobs: get("mc_mobs") == Some("1"),
+            kit: get("mc_blocks") == Some("kit"),
             difficulty: crate::minecraft_entities::parse_difficulty(get("mc_difficulty")),
             check: get("mc_check").and_then(|v| u64::from_str_radix(v, 16).ok()),
         })
@@ -1737,5 +1867,21 @@ fn shape_for_state(
         let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
         shape_ids.insert(key, id);
         id
+    })
+}
+
+/// The building kit each life starts with when the match gives one.
+const KIT: [&str; 4] = ["minecraft:stone", "minecraft:oak_planks", "minecraft:glass", "minecraft:dirt"];
+
+/// Whether a block would stand inside any of these players (feet in block
+/// space; MW2's soldier is about 0.85 blocks wide and 2 tall).
+fn block_hits_player((x, y, z): (i32, i32, i32), players: &[[f64; 3]]) -> bool {
+    players.iter().any(|&[fx, fy, fz]| {
+        (fx - 0.42) < f64::from(x + 1)
+            && (fx + 0.42) > f64::from(x)
+            && fy < f64::from(y + 1)
+            && (fy + 1.95) > f64::from(y)
+            && (fz - 0.42) < f64::from(z + 1)
+            && (fz + 0.42) > f64::from(z)
     })
 }

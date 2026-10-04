@@ -245,6 +245,8 @@ pub fn register_feature_commands(registry: &mut crate::ConsoleRegistry, maps: &[
         ("mc_load", "mc_load <name> — load a Minecraft save (loads the Minecraft map again)"),
         ("mc_saves", "mc_saves — list the Minecraft saves"),
         ("mc_time", "mc_time <day|noon|night|midnight|ticks> — set the Minecraft time of day"),
+        ("mc_slot", "mc_slot <1-9> — select a Minecraft hotbar slot"),
+        ("mc_use", "mc_use — one right click with what's held (places a block)"),
         (
             "menutext",
             "menutext <text> — type into the active native menu field",

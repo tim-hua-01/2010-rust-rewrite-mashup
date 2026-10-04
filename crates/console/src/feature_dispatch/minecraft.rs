@@ -26,6 +26,14 @@ pub(crate) fn route_minecraft_commands(
             ("mc_load", [name]) => frame::McWorldCommand::Load(name.clone()),
             ("mc_saves", []) => frame::McWorldCommand::List,
             ("mc_time", [value]) => frame::McWorldCommand::Time(value.clone()),
+            ("mc_slot", [slot]) => match slot.parse::<u8>() {
+                Ok(slot @ 1..=9) => frame::McWorldCommand::Slot(slot),
+                _ => {
+                    echo("usage: mc_slot <1-9>".into());
+                    continue;
+                }
+            },
+            ("mc_use", []) => frame::McWorldCommand::Use,
             ("mc_time", _) => {
                 echo("usage: mc_time <day|noon|night|midnight|ticks>".into());
                 continue;

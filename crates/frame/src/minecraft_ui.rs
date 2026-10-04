@@ -187,6 +187,10 @@ pub enum McWorldCommand {
     /// Sets the time of day: `day`, `noon`, `night`, `midnight`, or game
     /// ticks since sunrise (0..24000).
     Time(String),
+    /// Selects a hotbar slot (1..9).
+    Slot(u8),
+    /// One right click with what's held (places a block).
+    Use,
 }
 
 /// A line the Minecraft world answers a `McWorldCommand` with, for the
@@ -215,6 +219,14 @@ pub struct McChunkPart {
     pub part: u16,
     pub parts: u16,
     pub data: std::sync::Arc<[u8]>,
+}
+
+/// Items the host gives this client's Minecraft inventory (a refused
+/// placement's block back).
+#[derive(Message, Clone, Debug)]
+pub struct McGrant {
+    pub item: String,
+    pub count: u8,
 }
 
 /// A block the host changed: its position and new state (`BlockStateId`,

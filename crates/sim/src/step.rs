@@ -811,6 +811,9 @@ fn apply_actions(world: &mut FrameWorld, tick: Tick, actions: &[(ClientId, Clien
             ClientAction::LeaveMatch { request_id: _ } => {
                 world.retire_client(*id);
             }
+            ClientAction::McPlace { request_id: _, pos, state } => {
+                crate::voxel::push_place_request(id.0, pos, state);
+            }
             ClientAction::SetName {
                 request_id: _,
                 name,

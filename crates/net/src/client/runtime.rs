@@ -591,6 +591,7 @@ pub struct ReliableInbound<'w> {
     bridge: Option<Res<'w, crate::MasterBridge>>,
     minecraft: MessageWriter<'w, frame::McChunkPart>,
     minecraft_edits: MessageWriter<'w, frame::McEditsReceived>,
+    minecraft_grants: MessageWriter<'w, frame::McGrant>,
 }
 
 impl ReliableInbound<'_> {
@@ -661,6 +662,9 @@ impl ReliableInbound<'_> {
                 crate::ReliableRow::Scores(cmd) => {
                     self.scores.parsed = crate::parse_scoreboard_cmd(cmd);
                     self.scores.cmd = Some(cmd.clone());
+                }
+                crate::ReliableRow::McGrant { item, count } => {
+                    self.minecraft_grants.write(frame::McGrant { item: item.clone(), count: *count });
                 }
                 crate::ReliableRow::McEdits { generation, first_seq, edits } => {
                     self.minecraft_edits.write(frame::McEditsReceived {
@@ -1932,6 +1936,7 @@ pub fn register_client_runtime(app: &mut App) {
         .add_message::<ReliableControlEvent>()
         .add_message::<frame::McChunkPart>()
         .add_message::<frame::McEditsReceived>()
+        .add_message::<frame::McGrant>()
         .add_message::<frame::MatchInstalled>()
         .add_message::<frame::MatchTornDown>()
         .init_resource::<RemoteProxyState>()

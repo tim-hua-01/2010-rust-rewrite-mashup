@@ -107,6 +107,14 @@ pub enum ClientAction {
         request_id: ActionRequestId,
         name: [u8; MENU_RESPONSE_BYTES],
     },
+
+    /// Place a block on a Minecraft map: the block position and its state
+    /// (`BlockStateId`). The host validates and applies it.
+    McPlace {
+        request_id: ActionRequestId,
+        pos: [i32; 3],
+        state: u16,
+    },
 }
 
 pub const MENU_RESPONSE_BYTES: usize = 48;
@@ -175,6 +183,7 @@ pub fn action_request_id(action: &ClientAction) -> ActionRequestId {
         | ClientAction::ChooseDefaultClass { request_id, .. }
         | ClientAction::MenuResponse { request_id, .. }
         | ClientAction::GiveKillstreak { request_id, .. }
+        | ClientAction::McPlace { request_id, .. }
         | ClientAction::ResupplyAmmo { request_id } => request_id,
     }
 }

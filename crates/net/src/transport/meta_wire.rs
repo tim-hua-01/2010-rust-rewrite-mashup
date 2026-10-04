@@ -534,6 +534,14 @@ pub(crate) fn encode_action(out: &mut WireWriter, action: &ClientAction) {
             out.put_u32(request_id);
             out.put_bytes(&name);
         }
+        ClientAction::McPlace { request_id, pos, state } => {
+            out.put_u8(40);
+            out.put_u32(request_id);
+            out.put_i32(pos[0]);
+            out.put_i32(pos[1]);
+            out.put_i32(pos[2]);
+            out.put_u16(state);
+        }
     }
 }
 
@@ -626,6 +634,11 @@ pub(crate) fn decode_action(input: &mut WireReader<'_>) -> Result<ClientAction, 
         }
         20 => Ok(ClientAction::ResupplyAmmo {
             request_id: input.get_u32()?,
+        }),
+        40 => Ok(ClientAction::McPlace {
+            request_id: input.get_u32()?,
+            pos: [input.get_i32()?, input.get_i32()?, input.get_i32()?],
+            state: input.get_u16()?,
         }),
         18 => {
             let request_id = input.get_u32()?;

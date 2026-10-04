@@ -245,11 +245,13 @@ fn install_minecraft_controls(catalog: &mut asset_game::MenuCatalog) {
 /// Game Setup's Minecraft rows, each a host rule the Minecraft world reads
 /// when the match installs: difficulty (`scr_mc_difficulty`), the world
 /// border (`scr_mc_border`, half width in blocks) and mobs (`scr_mc_mobs`;
-/// auto is off when hosting for others). Each is a button like its
+/// auto is off when hosting for others) and building blocks (`scr_mc_blocks`:
+/// a kit each life, or what you mine; auto is a kit when hosting). Each is a
+/// button like its
 /// neighbours whose text names the choice; the popup's panel grows to hold
 /// them and the password row, which retail's four-row panel left out.
 fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
-    const ROWS: [(&str, &str, &[(&str, &str)]); 3] = [
+    const ROWS: [(&str, &str, &[(&str, &str)]); 4] = [
         ("mc_difficulty", "scr_mc_difficulty", &[
             ("MINECRAFT DIFFICULTY: PEACEFUL", "0"),
             ("MINECRAFT DIFFICULTY: EASY", "1"),
@@ -267,6 +269,11 @@ fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
             ("MINECRAFT MOBS: AUTO", "auto"),
             ("MINECRAFT MOBS: ON", "1"),
             ("MINECRAFT MOBS: OFF", "0"),
+        ]),
+        ("mc_blocks", "scr_mc_blocks", &[
+            ("MINECRAFT BLOCKS: AUTO", "auto"),
+            ("MINECRAFT BLOCKS: KIT", "kit"),
+            ("MINECRAFT BLOCKS: SURVIVAL", "survival"),
         ]),
     ];
     let Some(setup) = catalog.menus.get_mut("lobby_game_setup") else {

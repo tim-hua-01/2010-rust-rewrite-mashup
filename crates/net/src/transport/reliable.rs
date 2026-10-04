@@ -63,6 +63,9 @@ pub enum ReliableRow {
         edits: Vec<frame::McEdit>,
     },
 
+    /// Items for the client's Minecraft inventory (`frame::McGrant`).
+    McGrant { item: String, count: u8 },
+
     /// A piece of one Minecraft arena chunk (`frame::McTerrainSource`).
     McChunk {
         generation: u32,
@@ -187,6 +190,7 @@ const ROW_TAG_EVENT: u8 = 0;
 const ROW_TAG_OUTCOME: u8 = 1;
 const ROW_TAG_MC_CHUNK: u8 = 10;
 const ROW_TAG_MC_EDITS: u8 = 11;
+const ROW_TAG_MC_GRANT: u8 = 12;
 /// The most edits one `McEdits` row carries (14 bytes each).
 pub const MAX_MC_EDITS_PER_ROW: usize = 700;
 /// The most bytes one `McChunk` row carries.
@@ -252,6 +256,13 @@ pub fn encode_reliable_payload(
                     out.put_u16(*state);
                 }
             }
+            ReliableRow::McGrant { item, count } => {
+                out.put_u8(ROW_TAG_MC_GRANT);
+                let bytes = item.as_bytes();
+                out.put_u8(bytes.len().min(255) as u8);
+                out.put_bytes(&bytes[..bytes.len().min(255)]);
+                out.put_u8(*count);
+            }
             ReliableRow::McChunk { generation, pos, part, parts, data } => {
                 out.put_u8(ROW_TAG_MC_CHUNK);
                 out.put_u32(*generation);
@@ -283,6 +294,13 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
             ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
+            ROW_TAG_MC_GRANT => {
+                let len = usize::from(input.get_u8()?);
+                let mut bytes = vec![0u8; len];
+                input.get_bytes(&mut bytes)?;
+                let item = String::from_utf8(bytes).map_err(|_| WireError::Malformed("McGrant item"))?;
+                ReliableRow::McGrant { item, count: input.get_u8()? }
+            }
             ROW_TAG_MC_EDITS => {
                 let generation = input.get_u32()?;
                 let first_seq = input.get_u32()?;

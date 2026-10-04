@@ -312,6 +312,22 @@ pub fn push_player_damage(client: u32, amount: i32, from: Option<[f32; 3]>) {
     }
 }
 
+/// Block placements clients asked for (client, block position, state), for
+/// the Minecraft world on the host to validate and apply.
+static PLACE_REQUESTS: std::sync::Mutex<Vec<(u32, [i32; 3], u16)>> = std::sync::Mutex::new(Vec::new());
+
+pub(crate) fn push_place_request(client: u32, pos: [i32; 3], state: u16) {
+    if active()
+        && let Ok(mut requests) = PLACE_REQUESTS.lock()
+    {
+        requests.push((client, pos, state));
+    }
+}
+
+pub fn take_place_requests() -> Vec<(u32, [i32; 3], u16)> {
+    PLACE_REQUESTS.lock().map(|mut r| std::mem::take(&mut *r)).unwrap_or_default()
+}
+
 pub(crate) fn take_player_damage() -> Vec<(u32, i32, Option<[f32; 3]>)> {
     PLAYER_DAMAGE.lock().map(|mut d| std::mem::take(&mut *d)).unwrap_or_default()
 }
@@ -360,6 +376,7 @@ pub fn deactivate() {
     }
     let _ = take_events();
     let _ = take_player_damage();
+    let _ = take_place_requests();
     set_mob_boxes(Vec::new());
     set_mob_hostile(Vec::new());
     movement_iw4::set_step_size_override(None);

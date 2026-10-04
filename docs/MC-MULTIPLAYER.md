@@ -645,3 +645,14 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   Duo verified: 1,272 live edits applied with contiguous sequences; the client
   fell into the shaft the host dug. Not yet exercised with a non-empty join
   snapshot (duo connects both windows at start).
+* **Phase 3 done (2026-10-04):** clients place blocks with
+  `ClientAction::McPlace { pos, state }` (worked out with vanilla placement on a
+  copy of the scene, item taken locally); the host checks reach (7 blocks),
+  replaceable target, border and every player's box, then applies it through
+  the edit log, or returns the block with `ReliableRow::McGrant`. Kit mode
+  (Game Setup MINECRAFT BLOCKS; auto = kit when hosting) tops up 64 stone,
+  oak planks, glass and dirt each life. `mc_slot`/`mc_use` console commands
+  select a hotbar slot and right-click (for scripts and testing). Duo verified:
+  the host logged the client's stone placements and the kit filled slots 6–9.
+  Not done: survival-mode block grants (needs the breaker's id on voxel
+  events) and clients mining by hand (guns and knives already break blocks).
