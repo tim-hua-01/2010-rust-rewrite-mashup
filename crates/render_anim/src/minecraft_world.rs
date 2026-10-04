@@ -116,6 +116,8 @@ struct Runtime {
     restore: Option<crate::minecraft_saves::SaveMeta>,
     /// The player's feet in block space, as of the last frame.
     last_feet: Option<[f64; 3]>,
+    /// The heart sprites (`hearts_image`), once the world's packs are in.
+    hearts: Option<Handle<Image>>,
     world: Option<Loaded>,
     day: DayCycle,
     environment_accumulator: f64,
@@ -290,6 +292,21 @@ fn celestial_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
     Ok(celestial)
 }
 
+/// Vanilla's heart sprites side by side for the HUD's health bar: container,
+/// full, half, and the container's hurt flash.
+fn hearts_image(packs: &PackStack) -> anyhow::Result<image::RgbaImage> {
+    const NAMES: [&str; 4] = ["container", "full", "half", "container_blinking"];
+    let mut hearts = image::RgbaImage::new(9 * NAMES.len() as u32, 9);
+    for (index, name) in NAMES.iter().enumerate() {
+        let id = minecraft_terrain::pack::ResourceId::parse(&format!("minecraft:gui/sprites/hud/heart/{name}"))?;
+        let bytes = packs.texture(&id)?.ok_or_else(|| anyhow::anyhow!("no heart sprite {name}"))?;
+        let sprite = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)?.to_rgba8();
+        let sprite = image::imageops::resize(&sprite, 9, 9, image::imageops::FilterType::Nearest);
+        image::imageops::replace(&mut hearts, &sprite, index as i64 * 9, 0);
+    }
+    Ok(hearts)
+}
+
 /// A controller trigger, held or just pressed: with a block or an empty hand
 /// the right trigger mines and the left places, as the mouse buttons do.
 fn pad_trigger(pad: Option<&bevy::input::gamepad::Gamepad>, button: GamepadButton, just: bool) -> bool {
@@ -404,6 +421,27 @@ fn update(
                 view.crack_texture = Some(world.crack_texture.clone());
                 runtime.mining = Default::default();
                 runtime.sounds = Some(crate::minecraft_sounds::Sounds::load(&world.packs));
+                if runtime.hearts.is_none() {
+                    match hearts_image(&world.packs) {
+                        Ok(hearts) => {
+                            runtime.hearts = Some(images.add(Image {
+                                sampler: bevy::image::ImageSampler::nearest(),
+                                ..Image::new(
+                                    bevy::render::render_resource::Extent3d {
+                                        width: hearts.width(),
+                                        height: hearts.height(),
+                                        depth_or_array_layers: 1,
+                                    },
+                                    bevy::render::render_resource::TextureDimension::D2,
+                                    hearts.into_raw(),
+                                    bevy::render::render_resource::TextureFormat::Rgba8UnormSrgb,
+                                    bevy::asset::RenderAssetUsages::default(),
+                                )
+                            }));
+                        }
+                        Err(error) => diag::warn!(World, "Minecraft hearts unavailable: {error:#}"),
+                    }
+                }
                 runtime.entities = Some(crate::minecraft_entities::Entities::new(
                     &world.stream,
                     world.seed,
@@ -478,6 +516,7 @@ fn update(
         minimap,
         steps,
         last_feet,
+        hearts,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -933,6 +972,8 @@ fn update(
         ui.weapon_request = inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
         entities.selected = selected;
         inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
+        ui.hearts = hearts.clone();
+        ui.health = alive.then_some((ps.health as f32, ps.max_health.max(1) as f32));
 
         if let Some(sounds) = sounds.as_mut() {
             for (event, position, volume, pitch) in std::mem::take(&mut entities.sounds) {
@@ -1216,6 +1257,25 @@ fn world_command(
                     crate::minecraft_saves::saves_dir().join(name).display()
                 )),
                 Err(error) => report(format!("mc_save: {error}")),
+            }
+        }
+        frame::McWorldCommand::Time(value) => {
+            let ticks = match value.to_ascii_lowercase().as_str() {
+                "day" => Some(1000.0),
+                "noon" => Some(6000.0),
+                "night" => Some(13000.0),
+                "midnight" => Some(18000.0),
+                other => other.parse::<f64>().ok().filter(|t| (0.0..24000.0).contains(t)),
+            };
+            match (ticks, runtime.world.is_some()) {
+                (Some(ticks), true) => {
+                    // Keeps the day count, as `/time set` does.
+                    let day = (runtime.day.ticks / 24000.0).floor() * 24000.0;
+                    runtime.day.set(day + ticks);
+                    report(format!("time set to {ticks}"));
+                }
+                (Some(_), false) => report("mc_time: no Minecraft world is in play".to_owned()),
+                (None, _) => report(format!("mc_time: `{value}` is not day, noon, night, midnight or 0-23999")),
             }
         }
         frame::McWorldCommand::Load(name) => match crate::minecraft_saves::prepare_load(name) {

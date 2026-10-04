@@ -20,6 +20,8 @@ use crate::images::{HUD_CHROME_NAMESPACE, HudImages};
 
 /// The item icon atlas, drawn as a HUD material.
 const ICONS: &str = "mc_item_icons";
+/// Vanilla's heart sprites (`MinecraftUi::hearts`).
+const HEARTS: &str = "mc_hearts";
 
 const CENTER: i32 = 2;
 const MAX: i32 = 3;
@@ -84,6 +86,9 @@ pub(crate) struct MinecraftRaster;
 /// The input state the screen keeps between frames.
 #[derive(Default)]
 pub(crate) struct ScreenInput {
+    /// The health last drawn, and when it last fell, for the hearts' flash.
+    last_health: Option<f32>,
+    hurt_at: f64,
     last_click: Option<(McSlot, f64)>,
     /// A drag of the carried stack: the button and the slots crossed.
     drag: Option<(bool, Vec<usize>)>,
@@ -295,6 +300,9 @@ pub(crate) fn update_minecraft_hud(
     if let Some(icons) = ui.icons.clone() {
         hud_images.insert_runtime(ICONS, icons);
     }
+    if let Some(hearts) = ui.hearts.clone() {
+        hud_images.insert_runtime(HEARTS, hearts);
+    }
     let now = time.elapsed_secs_f64();
     let window = windows.single().ok();
     let mouse = window.and_then(Window::cursor_position);
@@ -344,6 +352,15 @@ pub(crate) fn update_minecraft_hud(
         }
         canvas.k = 1.15;
         draw_hotbar(&mut canvas, &mut ui, weapons, strings, &mut gaps, time.delta_secs());
+        if let Some((health, max)) = ui.health.filter(|_| ui.hearts.is_some()) {
+            if input.last_health.is_some_and(|last| health < last) {
+                input.hurt_at = now;
+            }
+            input.last_health = Some(health);
+            draw_hearts(&mut canvas, health, max, now - input.hurt_at < 0.6 && ((now - input.hurt_at) * 6.0) as i32 % 2 == 0);
+        } else {
+            input.last_health = None;
+        }
         ui.character_box = None;
     } else {
         for _ in wheel.read() {}
@@ -618,4 +635,25 @@ fn draw_inventory(
     canvas.fill(x, y, 2.0, 22.0, ACCENT, c);
     canvas.text(FONT_TITLE, x + 7.0, y + 3.0, title_px, HIGHLIGHT, &name, false, c);
     canvas.text(FONT_SMALL, x + 7.0, y + 13.5, sub_px, TEXT_DIM, &sub, false, c);
+}
+
+/// The health bar, vanilla's way: ten hearts above the hotbar's left end,
+/// each half heart a twentieth of the player's MW2 health, the outlines
+/// flashing white just after a hit.
+fn draw_hearts(canvas: &mut Canvas<'_>, health: f32, max: f32, flash: bool) {
+    let align = (CENTER, MAX);
+    // As `draw_hotbar` lays the hotbar out.
+    let (size, pitch) = (22.0, 25.0);
+    let x0 = -(pitch * 9.0 - (pitch - size)) * 0.5 - 3.0;
+    let y = -size - 3.0 - 3.0 - 11.0;
+    let halves = (health / max * 20.0).ceil().clamp(0.0, 20.0) as usize;
+    let cell = |i: usize| [i as f32 / 4.0, 0.0, (i + 1) as f32 / 4.0, 1.0];
+    for heart in 0..10 {
+        let x = x0 + heart as f32 * 8.0;
+        canvas.quad(x, y, 9.0, 9.0, [1.0; 4], HEARTS, cell(if flash { 3 } else { 0 }), align);
+        let filled = halves.saturating_sub(heart * 2).min(2);
+        if filled > 0 {
+            canvas.quad(x, y, 9.0, 9.0, [1.0; 4], HEARTS, cell(if filled == 2 { 1 } else { 2 }), align);
+        }
+    }
 }

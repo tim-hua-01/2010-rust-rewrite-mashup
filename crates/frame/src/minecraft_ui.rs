@@ -95,6 +95,11 @@ pub struct MinecraftUi {
     /// The minimap's picture of the world and the map points of its
     /// north-west and south-east corners.
     pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,
+    /// Vanilla's heart sprites side by side, 9 pixels each: container, full,
+    /// half, and the container's hurt flash.
+    pub hearts: Option<Handle<Image>>,
+    /// The player's MW2 health and its most, for the hearts.
+    pub health: Option<(f32, f32)>,
 }
 
 /// The player's own MW2 body, drawn standing in the inventory's character
@@ -179,6 +184,9 @@ pub enum McWorldCommand {
     Load(String),
     /// Names the saves there are.
     List,
+    /// Sets the time of day: `day`, `noon`, `night`, `midnight`, or game
+    /// ticks since sunrise (0..24000).
+    Time(String),
 }
 
 /// A line the Minecraft world answers a `McWorldCommand` with, for the

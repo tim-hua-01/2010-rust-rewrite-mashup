@@ -2,7 +2,7 @@ use bevy::prelude::*;
 
 use crate::{ConsoleCommand, ConsoleLine, ConsoleSettings, ConsoleState};
 
-/// `mc_save`, `mc_load` and `mc_saves`, handed to the Minecraft world, whose
+/// `mc_save`, `mc_load`, `mc_saves` and `mc_time`, handed to the Minecraft world, whose
 /// answers come back as console lines.
 pub(crate) fn route_minecraft_commands(
     mut events: MessageReader<ConsoleCommand>,
@@ -25,6 +25,11 @@ pub(crate) fn route_minecraft_commands(
             ("mc_save", [name]) => frame::McWorldCommand::Save(name.clone()),
             ("mc_load", [name]) => frame::McWorldCommand::Load(name.clone()),
             ("mc_saves", []) => frame::McWorldCommand::List,
+            ("mc_time", [value]) => frame::McWorldCommand::Time(value.clone()),
+            ("mc_time", _) => {
+                echo("usage: mc_time <day|noon|night|midnight|ticks>".into());
+                continue;
+            }
             ("mc_save", _) => {
                 echo("usage: mc_save <name>".into());
                 continue;
