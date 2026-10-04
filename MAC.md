@@ -67,17 +67,9 @@ Pick a class whose primary has the heartbeat attachment (Create a Class), then
 select that gun: hostile mobs ping red on the gun's sensor screen, other mobs
 as friendlies.
 
-## Multiplayer relay
+## Multiplayer
 
-The relay (`iw4l-master`) runs locally with certificates in `~/.iw4l/ca`; the
-`.env` here points the game at it. Start it with:
-
-```bash
-nohup ./target/play/iw4l-master serve --bind 127.0.0.1:4433 \
-  --cert ~/.iw4l/ca/server-cert.pem --key ~/.iw4l/ca/server-key.pem \
-  > ../logs/master-local.log 2>&1 &
-```
-
-Stop it with `pkill iw4l-master`. Friends can't reach it yet: bind it to an
-address they can reach (and give them `~/.iw4l/ca/iw4l-ca.pem`) first. The
-Minecraft world itself isn't shared between players yet.
+See [FRIENDS.md](FRIENDS.md). In short: `scripts/mc-host-relay.sh start` runs
+the relay on this Mac's Tailscale address and prints what to send friends;
+`scripts/mc-host-relay.sh stop` stops it. The relay's certificates live in
+`~/.iw4l/ca`; only `iw4l-ca.pem` is meant to be shared.

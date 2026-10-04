@@ -678,3 +678,11 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   blocks, the client's spawn chunk matches. MW2 dynamic props (luggage) still
   draw over the replica. Crash and Overgrown need the Stimulus Package DLC,
   which isn't installed.
+* **Phase 5, step 1 (2026-10-04):** `scripts/mc-host-relay.sh start|stop|status`
+  runs the relay on the host's Tailscale address (makes the certificates the
+  first time) and points the host's `.env` at it; `scripts/mc-friend-setup.sh`
+  writes a friend's `.env` from the relay address and `iw4l-ca.pem`;
+  `FRIENDS.md` walks both through setup. Duo verified through the Tailscale
+  address (Rust replica, TDM): both peers' QUIC handshakes to
+  100.x:4433, client spawn chunk matches. Not yet: a session with a friend on
+  another machine.
