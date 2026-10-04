@@ -1033,6 +1033,18 @@ fn preflight_match_install(
             None => script_dvars.push((name.clone(), value.clone())),
         }
     }
+    // A shorter wait before the match than retail's 15 + 5 seconds, unless
+    // the host set its own (`gamemode_iw4::prematch` keeps the same times).
+    for (name, seconds) in [("scr_game_playerwaittime", "3"), ("scr_game_matchstarttime", "3")] {
+        let hosted = rules.is_some_and(|rules| rules.0.iter().any(|(set, _)| set.eq_ignore_ascii_case(name)));
+        if hosted {
+            continue;
+        }
+        match script_dvars.iter_mut().find(|(set, _)| set.eq_ignore_ascii_case(name)) {
+            Some((_, set)) => *set = seconds.into(),
+            None => script_dvars.push((name.into(), seconds.into())),
+        }
+    }
     // A Minecraft world has no time or score limit.
     if assets::minecraft_map::is_minecraft_load(zone) {
         for limit in ["timelimit", "scorelimit"] {

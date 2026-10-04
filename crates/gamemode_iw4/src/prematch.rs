@@ -1,6 +1,9 @@
-pub(crate) const PLAYER_WAIT_MS: u32 = 15_000;
+/// How long the match waits for more players, and then counts down to its
+/// start: shorter than retail's 15 and 5 seconds, as `scr_game_playerwaittime`
+/// and `scr_game_matchstarttime` default to in `session::match_apply`.
+pub(crate) const PLAYER_WAIT_MS: u32 = 3_000;
 
-pub const MATCH_START_MS: u32 = 5_000;
+pub const MATCH_START_MS: u32 = 3_000;
 
 pub const DEFAULT_ALLIES_CHARSET: &str = "us_army";
 
