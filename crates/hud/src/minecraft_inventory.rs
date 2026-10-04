@@ -84,8 +84,6 @@ pub(crate) struct MinecraftRaster;
 /// The input state the screen keeps between frames.
 #[derive(Default)]
 pub(crate) struct ScreenInput {
-    /// When the heartbeat sensor last pulsed, and the contacts it caught.
-    heartbeat: Option<(f64, Vec<frame::McBlip>)>,
     last_click: Option<(McSlot, f64)>,
     /// A drag of the carried stack: the button and the slots crossed.
     drag: Option<(bool, Vec<usize>)>,
@@ -346,22 +344,6 @@ pub(crate) fn update_minecraft_hud(
         }
         canvas.k = 1.15;
         draw_hotbar(&mut canvas, &mut ui, weapons, strings, &mut gaps, time.delta_secs());
-        canvas.k = 1.0;
-        match ui.heartbeat.clone() {
-            Some(contacts) => {
-                let pulse = match &input.heartbeat {
-                    Some((at, _)) if now - at < HEARTBEAT_PULSE => *at,
-                    _ => now,
-                };
-                if input.heartbeat.as_ref().is_none_or(|(at, _)| *at != pulse) {
-                    input.heartbeat = Some((pulse, contacts));
-                }
-                if let Some((at, caught)) = &input.heartbeat {
-                    draw_heartbeat(&mut canvas, caught, ((now - at) / HEARTBEAT_PULSE) as f32);
-                }
-            }
-            None => input.heartbeat = None,
-        }
         ui.character_box = None;
     } else {
         for _ in wheel.read() {}
@@ -636,61 +618,4 @@ fn draw_inventory(
     canvas.fill(x, y, 2.0, 22.0, ACCENT, c);
     canvas.text(FONT_TITLE, x + 7.0, y + 3.0, title_px, HIGHLIGHT, &name, false, c);
     canvas.text(FONT_SMALL, x + 7.0, y + 13.5, sub_px, TEXT_DIM, &sub, false, c);
-}
-
-/// Seconds between the heartbeat sensor's pulses; contacts hold between them.
-const HEARTBEAT_PULSE: f64 = 1.5;
-/// The sensor's reach in map units, as the world measures contacts.
-const HEARTBEAT_RANGE: f32 = 1500.0;
-
-/// The heartbeat sensor, MW2's way: a green fan ahead of the player with
-/// range rings, a sweep that grows out each pulse, and the contacts the last
-/// pulse caught, fading until the next. Hostile mobs are red, neutral ones
-/// amber, the rest green. `phase` runs 0..1 over a pulse.
-fn draw_heartbeat(canvas: &mut Canvas<'_>, contacts: &[frame::McBlip], phase: f32) {
-    const ALIGN: (i32, i32) = (MAX, MAX);
-    const W: f32 = 132.0;
-    const H: f32 = 78.0;
-    let (x0, y0) = (-W - 24.0, -H - 96.0);
-    let base = [x0 + W * 0.5, y0 + H - 6.0];
-    let radius = H - 12.0;
-    let green = [0.45, 1.0, 0.55, 1.0];
-    canvas.fill(x0, y0, W, H, [0.0, 0.07, 0.03, 0.62], ALIGN);
-    canvas.frame(x0, y0, W, H, [0.45, 1.0, 0.55, 0.35], ALIGN);
-    // Range rings and the fan's edges, as dots on the upper half circle.
-    let dot = |canvas: &mut Canvas<'_>, r: f32, angle: f32, size: f32, color: [f32; 4]| {
-        let (x, y) = (base[0] + r * angle.cos(), base[1] - r * angle.sin());
-        canvas.fill(x - size * 0.5, y - size * 0.5, size, size, color, ALIGN);
-    };
-    for ring in 1..=3 {
-        let r = radius * ring as f32 / 3.0;
-        let n = 10 * ring;
-        for i in 0..=n {
-            let angle = std::f32::consts::PI * i as f32 / n as f32;
-            dot(canvas, r, angle, 1.0, [0.45, 1.0, 0.55, 0.3]);
-        }
-    }
-    // The pulse's sweep growing out from the player.
-    let sweep = radius * phase.clamp(0.0, 1.0);
-    for i in 0..=36 {
-        let angle = std::f32::consts::PI * i as f32 / 36.0;
-        dot(canvas, sweep, angle, 1.5, [0.45, 1.0, 0.55, 0.6 * (1.0 - phase)]);
-    }
-    canvas.fill(base[0] - 2.0, base[1] - 2.0, 4.0, 4.0, green, ALIGN);
-    let fade = (1.0 - phase * 0.7).clamp(0.0, 1.0);
-    for contact in contacts {
-        // Only what lies ahead, as the sensor's fan shows it.
-        if contact.forward < 0.0 {
-            continue;
-        }
-        let scale = radius / HEARTBEAT_RANGE;
-        let (x, y) = (base[0] + contact.right * scale, base[1] - contact.forward * scale);
-        let rgb = match contact.kind {
-            frame::McBlipKind::Hostile => [1.0, 0.18, 0.12],
-            frame::McBlipKind::Neutral => [1.0, 0.7, 0.15],
-            frame::McBlipKind::Passive => [0.45, 1.0, 0.55],
-        };
-        let size = if contact.kind == frame::McBlipKind::Hostile { 5.0 } else { 4.0 };
-        canvas.fill(x - size * 0.5, y - size * 0.5, size, size, [rgb[0], rgb[1], rgb[2], fade], ALIGN);
-    }
 }

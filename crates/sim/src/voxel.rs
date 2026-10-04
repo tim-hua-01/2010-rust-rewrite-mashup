@@ -165,6 +165,29 @@ pub fn set_mob_boxes(boxes: Vec<(u64, [f64; 6])>) {
     }
 }
 
+/// Keys of the world's hostile mobs (monsters), which the heartbeat sensor
+/// shows as enemies.
+static MOB_HOSTILE: RwLock<Vec<u64>> = RwLock::new(Vec::new());
+
+pub fn set_mob_hostile(keys: Vec<u64>) {
+    if let Ok(mut held) = MOB_HOSTILE.write() {
+        *held = keys;
+    }
+}
+
+/// The world's mobs as the heartbeat sensor sees them: each one's key, the
+/// centre of its box in map space, and whether it is hostile.
+pub fn mob_contacts() -> Vec<(u64, [f32; 3], bool)> {
+    let hostile = MOB_HOSTILE.read().map(|keys| keys.clone()).unwrap_or_default();
+    mob_targets()
+        .into_iter()
+        .map(|(key, mins, maxs)| {
+            let centre = std::array::from_fn(|k| (mins[k] + maxs[k]) * 0.5);
+            (key, centre, hostile.contains(&key))
+        })
+        .collect()
+}
+
 /// The nearest mob on the map-space segment `start`..`end`: its key, the
 /// distance to it in map units and how far up its box the bullet struck
 /// (0 at the feet, 1 at the top).
@@ -328,6 +351,7 @@ pub fn deactivate() {
     let _ = take_events();
     let _ = take_player_damage();
     set_mob_boxes(Vec::new());
+    set_mob_hostile(Vec::new());
 }
 
 /// Adds shape ids to the table and returns the first new id.

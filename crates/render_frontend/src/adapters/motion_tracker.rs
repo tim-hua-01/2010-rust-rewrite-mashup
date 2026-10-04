@@ -29,6 +29,14 @@ struct Ping {
     enemy: bool,
 }
 
+/// What a ping is of: a player, or a mob of the Minecraft world
+/// (`sim::voxel::mob_contacts`).
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Contact {
+    Player(sim::ClientId),
+    Mob(u64),
+}
+
 #[derive(Resource, Default)]
 pub(crate) struct MotionTracker {
     owner: Option<(u64, sim::ClientId, sim::LifeSequence)>,
@@ -38,7 +46,7 @@ pub(crate) struct MotionTracker {
     active: bool,
     ping_played: bool,
     changed_at: i32,
-    contacts: HashMap<sim::ClientId, [Option<Ping>; 2]>,
+    contacts: HashMap<Contact, [Option<Ping>; 2]>,
 }
 
 pub(crate) fn register(app: &mut App) {
@@ -151,31 +159,39 @@ pub(crate) fn draw_motion_tracker(
         let previous_radius = previous as f32 * SWEEP_SPEED / 1000.0;
         let yaw = ps.viewangles[1].to_radians();
         let forward = Vec2::new(yaw.cos(), yaw.sin());
-        for (id, state) in snapshot
-            .players
-            .iter()
-            .filter(|_| active || elapsed < SWEEP_MS)
-        {
-            if now.saturating_sub(sim::level_time_ms(snapshot.tick)) > 500
-                || *id == local.0
-                || state.health <= 0
-                || state.perks[0] & (1 << 28) != 0
-            {
-                continue;
+        // Who the sweep can catch: living players not on Ninja Pro, and on a
+        // Minecraft map its mobs, monsters as enemies and the rest friendly.
+        let mut candidates: Vec<(Contact, Vec2, bool)> = Vec::new();
+        if active || elapsed < SWEEP_MS {
+            for (id, state) in &snapshot.players {
+                if now.saturating_sub(sim::level_time_ms(snapshot.tick)) > 500
+                    || *id == local.0
+                    || state.health <= 0
+                    || state.perks[0] & (1 << 28) != 0
+                {
+                    continue;
+                }
+                let Some(actor) = snapshot
+                    .meta
+                    .clients
+                    .iter()
+                    .find(|(c, _)| c == id)
+                    .map(|(_, m)| m)
+                else {
+                    continue;
+                };
+                if actor.lifecycle != sim::ClientLifecycle::Alive || actor.client_state_team == 3 {
+                    continue;
+                }
+                let enemy = !matches!(meta.client_state_team, 1 | 2)
+                    || meta.client_state_team != actor.client_state_team;
+                candidates.push((Contact::Player(*id), Vec2::new(state.origin[0], state.origin[1]), enemy));
             }
-            let Some(actor) = snapshot
-                .meta
-                .clients
-                .iter()
-                .find(|(c, _)| c == id)
-                .map(|(_, m)| m)
-            else {
-                continue;
-            };
-            if actor.lifecycle != sim::ClientLifecycle::Alive || actor.client_state_team == 3 {
-                continue;
+            for (key, centre, hostile) in sim::voxel::mob_contacts() {
+                candidates.push((Contact::Mob(key), Vec2::new(centre[0], centre[1]), hostile));
             }
-            let position = Vec2::new(state.origin[0], state.origin[1]);
+        }
+        for (contact, position, enemy) in candidates {
             let delta = position - origin;
             if delta.length_squared() > radius * radius
                 || (elapsed < SWEEP_MS
@@ -191,8 +207,7 @@ pub(crate) fn draw_motion_tracker(
                 start_angle: (delta.y.atan2(delta.x) - yaw).rem_euclid(std::f32::consts::TAU),
                 end_angle: (delta.y.atan2(delta.x) - yaw).rem_euclid(std::f32::consts::TAU),
                 time: now,
-                enemy: !matches!(meta.client_state_team, 1 | 2)
-                    || meta.client_state_team != actor.client_state_team,
+                enemy,
             };
             if ping.enemy && !tracker.ping_played {
                 if let Some([tl, bl, br]) = bolts.tracker_screen {
@@ -207,7 +222,7 @@ pub(crate) fn draw_motion_tracker(
                     }
                 }
             }
-            let history = tracker.contacts.entry(*id).or_insert([None, None]);
+            let history = tracker.contacts.entry(contact).or_insert([None, None]);
             history[1] = history[0];
             history[0] = Some(ping);
         }

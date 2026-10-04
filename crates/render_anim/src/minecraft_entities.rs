@@ -522,23 +522,23 @@ impl Entities {
     }
 
     /// Every living mob's key and box in blocks, for bullets.
-    /// Each living mob's box centre in block space, and what kind of contact
-    /// the heartbeat sensor shows it as.
-    pub(crate) fn blips(&self) -> Vec<([f64; 3], frame::McBlipKind)> {
+    /// Keys of the living hostile mobs (monsters), in `boxes`' encoding.
+    pub(crate) fn hostile_keys(&self) -> Vec<u64> {
         self.boxes()
             .into_iter()
-            .filter_map(|(key, b)| {
-                let kind = match decode(key)? {
-                    MobHit::Zombie(_)
-                    | MobHit::Skeleton(_)
-                    | MobHit::Creeper(_)
-                    | MobHit::Spider(_)
-                    | MobHit::Slime(_)
-                    | MobHit::Witch(_) => frame::McBlipKind::Hostile,
-                    MobHit::Enderman(_) | MobHit::Wolf(_) | MobHit::IronGolem(_) => frame::McBlipKind::Neutral,
-                    _ => frame::McBlipKind::Passive,
-                };
-                Some(([(b[0] + b[3]) * 0.5, (b[1] + b[4]) * 0.5, (b[2] + b[5]) * 0.5], kind))
+            .map(|(key, _)| key)
+            .filter(|&key| {
+                matches!(
+                    decode(key),
+                    Some(
+                        MobHit::Zombie(_)
+                            | MobHit::Skeleton(_)
+                            | MobHit::Creeper(_)
+                            | MobHit::Spider(_)
+                            | MobHit::Slime(_)
+                            | MobHit::Witch(_)
+                    )
+                )
             })
             .collect()
     }

@@ -95,27 +95,6 @@ pub struct MinecraftUi {
     /// The minimap's picture of the world and the map points of its
     /// north-west and south-east corners.
     pub minimap: Option<(Handle<Image>, [f32; 2], [f32; 2])>,
-    /// The heartbeat sensor's contacts while the held gun carries one; `None`
-    /// when it does not.
-    pub heartbeat: Option<Vec<McBlip>>,
-}
-
-/// A heartbeat sensor contact, relative to the player in map units: `right`
-/// and `forward` along the view's yaw.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct McBlip {
-    pub right: f32,
-    pub forward: f32,
-    pub kind: McBlipKind,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum McBlipKind {
-    /// Monsters: zombies, skeletons, creepers, spiders, slimes, witches.
-    Hostile,
-    /// Mobs that fight back when provoked: endermen, wolves, iron golems.
-    Neutral,
-    Passive,
 }
 
 /// The player's own MW2 body, drawn standing in the inventory's character

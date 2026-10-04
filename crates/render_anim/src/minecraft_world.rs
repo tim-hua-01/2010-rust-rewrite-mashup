@@ -933,7 +933,6 @@ fn update(
         ui.weapon_request = inventory_ui.weapon_request(&entities.inventory, &mut selected, ps.weapon as u32);
         entities.selected = selected;
         inventory_ui.publish(&mut ui, &entities.inventory, selected, &world.packs, &mut images);
-        ui.heartbeat = heartbeat_contacts(&authority.0, ps, origin, entities);
 
         if let Some(sounds) = sounds.as_mut() {
             for (event, position, volume, pitch) in std::mem::take(&mut entities.sounds) {
@@ -971,6 +970,7 @@ fn update(
         }
 
         sim::voxel::set_mob_boxes(entities.boxes());
+        sim::voxel::set_mob_hostile(entities.hostile_keys());
         entities.tick_scene(&world.scene, mob_ticks);
         let sky_darken = (15.0 - world.environment.sky_light_level()).clamp(0.0, 15.0) as u8;
         let meshes = entities.meshes(
@@ -1229,38 +1229,4 @@ fn world_command(
             Err(error) => report(format!("mc_load: {error}")),
         },
     }
-}
-
-/// How far the heartbeat sensor reaches, in map units (MW2's sensor shows
-/// about this much ahead).
-const HEARTBEAT_RANGE: f32 = 1500.0;
-
-/// The mobs within the heartbeat sensor's reach while the held gun carries
-/// one (a `_heartbeat` weapon), placed relative to the player's view.
-fn heartbeat_contacts(
-    sim: &sim::SimWorld,
-    ps: &playerstate_iw4::PlayerState,
-    origin: [f64; 3],
-    entities: &crate::minecraft_entities::Entities,
-) -> Option<Vec<frame::McBlip>> {
-    let names = sim.weapon_script_names();
-    let held = names.get(usize::try_from(ps.weapon).ok()?)?;
-    if !held.contains("heartbeat") {
-        return None;
-    }
-    let (sin, cos) = ps.viewangles[1].to_radians().sin_cos();
-    Some(
-        entities
-            .blips()
-            .into_iter()
-            .filter_map(|(centre, kind)| {
-                let at = sim::voxel::to_map(origin, centre);
-                let (dx, dy) = (at[0] - ps.origin[0], at[1] - ps.origin[1]);
-                // MW2 yaw: 0 along +X, increasing to the left (+Y).
-                let forward = dx * cos + dy * sin;
-                let right = dx * sin - dy * cos;
-                (forward.hypot(right) <= HEARTBEAT_RANGE).then_some(frame::McBlip { right, forward, kind })
-            })
-            .collect(),
-    )
 }
