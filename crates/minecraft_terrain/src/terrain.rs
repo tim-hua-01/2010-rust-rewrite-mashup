@@ -1348,6 +1348,53 @@ impl TerrainStream {
         }
     }
 
+    /// A column's chunk as the world generates it, generated here and now if
+    /// need be (raw material for a built arena).
+    pub fn generated_base(&mut self, pos: ChunkPos) -> Arc<Chunk> {
+        self.server.load_now(minecraftoss_core::ChunkPos::new(pos.0, pos.1))
+    }
+
+    /// A superflat copy of a generated chunk: bedrock at the bottom, stone,
+    /// three dirt, grass at `ground`, air above; biomes kept, no block
+    /// entities, entities or light (lighting is worked out where it's shown).
+    pub fn flat_chunk(&self, base: &Chunk, ground: i32) -> Chunk {
+        let registries = self.states.registries();
+        let state = |name: &str| {
+            registries
+                .blocks
+                .block_by_name(name)
+                .map_or(minecraftoss_core::BlockStateId::AIR, |id| registries.blocks.block(id).default_state())
+        };
+        let (bedrock, stone, dirt, grass) =
+            (state("minecraft:bedrock"), state("minecraft:stone"), state("minecraft:dirt"), state("minecraft:grass_block"));
+        let mut chunk = base.clone();
+        chunk.block_entities = Default::default();
+        chunk.generation.entities.clear();
+        chunk.light = None;
+        let (min_y, height) = (chunk.min_y(), chunk.height());
+        for y in min_y..min_y + height {
+            let block = if y == min_y {
+                bedrock
+            } else if y < ground - 3 {
+                stone
+            } else if y < ground {
+                dirt
+            } else if y == ground {
+                grass
+            } else {
+                minecraftoss_core::BlockStateId::AIR
+            };
+            for z in 0..16 {
+                for x in 0..16 {
+                    chunk.set_block_raw(x, y, z, block, registries);
+                }
+            }
+        }
+        let kinds = chunk.status.heightmaps();
+        chunk.prime_heightmaps(kinds, registries);
+        chunk
+    }
+
     /// Whether a held column's chunk has arrived.
     pub fn is_provided(&self, pos: ChunkPos) -> bool {
         self.provided.contains_key(&pos)

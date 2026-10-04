@@ -656,3 +656,13 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   the host logged the client's stone placements and the kit filled slots 6–9.
   Not done: survival-mode block grants (needs the breaker's id on voxel
   events) and clients mining by hand (guns and knives already break blocks).
+* **Phase 4 (arenas) done (2026-10-04):** team spawns on the surface inside the
+  border (teams on opposite sides, others spread, ground checked every spawn);
+  Game Setup MINECRAFT MATCH (endless / the mode's limits); MINECRAFT WORLD:
+  natural or flat. Flat arenas are built by the host (`TerrainStream::
+  flat_chunk` over each generated arena chunk, provided to its own held arena)
+  and reach clients like any terrain; built arenas run without mobs. This is
+  the mechanism replicas will use. Duo verified in TDM on a flat arena: the
+  client's spawn chunk matches, teams spawn ~76 blocks apart on the plain.
+  Not done: a visible border wall; the HUD timer shows no time limit on
+  Minecraft maps (`sim/src/world.rs` zeroes it while voxels are active).

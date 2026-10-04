@@ -154,6 +154,9 @@ pub(crate) fn route(
     if dvars.get("scr_mc_blocks").is_none() {
         dvars.set("scr_mc_blocks", "auto");
     }
+    if dvars.get("scr_mc_world").is_none() {
+        dvars.set("scr_mc_world", "natural");
+    }
     if dvars.get("scr_mc_limits").is_none() {
         dvars.set("scr_mc_limits", "endless");
     }

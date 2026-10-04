@@ -251,7 +251,7 @@ fn install_minecraft_controls(catalog: &mut asset_game::MenuCatalog) {
 /// neighbours whose text names the choice; the popup's panel grows to hold
 /// them and the password row, which retail's four-row panel left out.
 fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
-    const ROWS: [(&str, &str, &[(&str, &str)]); 5] = [
+    const ROWS: [(&str, &str, &[(&str, &str)]); 6] = [
         ("mc_difficulty", "scr_mc_difficulty", &[
             ("MINECRAFT DIFFICULTY: PEACEFUL", "0"),
             ("MINECRAFT DIFFICULTY: EASY", "1"),
@@ -274,6 +274,10 @@ fn install_minecraft_difficulty(catalog: &mut asset_game::MenuCatalog) {
             ("MINECRAFT BLOCKS: AUTO", "auto"),
             ("MINECRAFT BLOCKS: KIT", "kit"),
             ("MINECRAFT BLOCKS: SURVIVAL", "survival"),
+        ]),
+        ("mc_world", "scr_mc_world", &[
+            ("MINECRAFT WORLD: NATURAL", "natural"),
+            ("MINECRAFT WORLD: FLAT", "flat"),
         ]),
         ("mc_limits", "scr_mc_limits", &[
             ("MINECRAFT MATCH: ENDLESS", "endless"),

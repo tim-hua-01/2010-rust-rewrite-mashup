@@ -258,7 +258,7 @@ pub(crate) fn register(app: &mut App) {
         );
 }
 
-fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32) -> Result<Loaded, String> {
+fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32, built: Option<(WorldKind, i32)>) -> Result<Loaded, String> {
     let root = assets::minecraft_map::root().ok_or_else(assets::minecraft_setup::status)?;
     let paths = DataPaths::under(&root);
     let registries = Arc::new(Registries::load(&paths)?);
@@ -274,7 +274,24 @@ fn load(seed: i64, world: Option<std::path::PathBuf>, view_distance: i32) -> Res
     .map_err(|e| e.to_string())?;
     let build = minecraft_terrain::mesh::build(&HandcraftedScene::default(), &packs)
         .map_err(|e| e.to_string())?;
-    let scene = HandcraftedScene::streamed(stream.states.clone());
+    let mut scene = HandcraftedScene::streamed(stream.states.clone());
+    let mut stream = stream;
+    // A built arena (flat): the host makes its chunks and shows only those,
+    // with the spawn standing on the new ground.
+    if let Some((WorldKind::Flat, radius)) = built {
+        let (sx, sy, sz) = stream.player_spawn;
+        let ground = sy.floor() as i32 - 1;
+        let spawn_chunk = ((sx.floor() as i32) >> 4, (sz.floor() as i32) >> 4);
+        stream.set_held_area(Some((spawn_chunk, radius)));
+        for x in -radius..=radius {
+            for z in -radius..=radius {
+                let base = stream.generated_base((spawn_chunk.0 + x, spawn_chunk.1 + z));
+                let flat = stream.flat_chunk(&base, ground);
+                stream.provide_chunk(Arc::new(flat), &mut scene);
+            }
+        }
+        stream.player_spawn = (sx, f64::from(ground + 1), sz);
+    }
     let environment =
         DimensionEnvironment::load(&registries, Dimension::Overworld.dimension_type())?;
     let celestial = Arc::new(celestial_image(&packs).map_err(|e| e.to_string())?);
@@ -475,7 +492,12 @@ fn update(
                 Some("survival") => false,
                 _ => hosting,
             };
-            runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, kit, difficulty, check: None });
+            let kind = WorldKind::parse(
+                &std::env::var("IW4L_MINECRAFT_WORLD").ok().or_else(|| host_rule("scr_mc_world")).unwrap_or_default(),
+            );
+            // Mobs live in the generated terrain, which a built arena replaces.
+            let mobs = mobs && kind == WorldKind::Natural;
+            runtime.settings = Some(WorldSettings { seed, origin: None, border, mobs, kit, kind, difficulty, check: None });
             diag::info!(World, "Minecraft world: seed {seed}, difficulty {difficulty:?}, border {border}, mobs {mobs}");
             let world_dir = loading_save.as_ref().map(|(_, dir)| dir.clone());
             // The host keeps the whole arena loaded around its centre.
@@ -485,7 +507,7 @@ fn update(
             let _ = std::thread::Builder::new()
                 .name("minecraft-world-load".into())
                 .spawn(move || {
-                    let _ = send.send(load(seed, world_dir, view_distance));
+                    let _ = send.send(load(seed, world_dir, view_distance, Some((kind, arena_radius(border)))));
                 });
             runtime.loading = Some(receive);
         }
@@ -506,7 +528,7 @@ fn update(
         let _ = std::thread::Builder::new()
             .name("minecraft-world-load".into())
             .spawn(move || {
-                let _ = send.send(load(seed, None, VIEW_DISTANCE));
+                let _ = send.send(load(seed, None, VIEW_DISTANCE, None));
             });
         runtime.loading = Some(receive);
     }
@@ -1789,6 +1811,8 @@ struct WorldSettings {
     mobs: bool,
     /// Every life starts with a building kit (else blocks come from mining).
     kit: bool,
+    /// What the arena is made of.
+    kind: WorldKind,
     difficulty: minecraftoss_player::Difficulty,
     /// The host's spawn-chunk checksum (`chunk_checksum`).
     check: Option<u64>,
@@ -1804,6 +1828,7 @@ impl WorldSettings {
         sim.set_server_info("mc_border", &self.border.to_string());
         sim.set_server_info("mc_mobs", if self.mobs { "1" } else { "0" });
         sim.set_server_info("mc_blocks", if self.kit { "kit" } else { "survival" });
+        sim.set_server_info("mc_world", self.kind.name());
         sim.set_server_info("mc_difficulty", &format!("{:?}", self.difficulty).to_ascii_lowercase());
         sim.set_server_info("mc_time", &(day_ticks.round() as i64).to_string());
         if let Some(check) = self.check {
@@ -1824,6 +1849,7 @@ impl WorldSettings {
             border: get("mc_border").and_then(|v| v.parse().ok()).unwrap_or(0.0),
             mobs: get("mc_mobs") == Some("1"),
             kit: get("mc_blocks") == Some("kit"),
+            kind: WorldKind::parse(get("mc_world").unwrap_or("natural")),
             difficulty: crate::minecraft_entities::parse_difficulty(get("mc_difficulty")),
             check: get("mc_check").and_then(|v| u64::from_str_radix(v, 16).ok()),
         })
@@ -1952,4 +1978,29 @@ fn surface(world: &Loaded, x: i32, z: i32, around: i32) -> Option<i32> {
         })
     };
     (around - 48..=around + 48).rev().find(|&y| solid(y) && free(y + 1) && free(y + 2))
+}
+
+/// What a Minecraft arena is made of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorldKind {
+    /// Seeded generation.
+    Natural,
+    /// Superflat, built by the host.
+    Flat,
+}
+
+impl WorldKind {
+    fn parse(name: &str) -> Self {
+        match name.trim() {
+            "flat" => Self::Flat,
+            _ => Self::Natural,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Natural => "natural",
+            Self::Flat => "flat",
+        }
+    }
 }
