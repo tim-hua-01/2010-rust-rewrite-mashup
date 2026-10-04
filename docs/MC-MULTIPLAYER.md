@@ -635,3 +635,13 @@ The spawn-chunk checksum (`mc_check`) stays as a safety net either way.
   authoritative position on both sides; the border stops players; Game Setup
   shows difficulty, border and mobs rows. Remote players still spawn at the
   stand-in map's spawn points (Phase 4 replaces them).
+* **Phase 2 done (2026-10-04):** the host logs every block change (bullets,
+  blasts, its own placing, mob-server changes) as `(pos, BlockStateId)` in
+  `frame::McEditLog`; `net` sends a new client the compacted state
+  (`ReliableRow::McEdits`, `first_seq` 0) then every later edit in order, on the
+  same ordered lane and window as terrain, edits first. A client stores edits
+  in the scene overlay even for chunks not loaded (`set_authoritative`), so a
+  chunk arriving later gets them; chunk loads lay the overlay over collision.
+  Duo verified: 1,272 live edits applied with contiguous sequences; the client
+  fell into the shaft the host dug. Not yet exercised with a non-empty join
+  snapshot (duo connects both windows at start).

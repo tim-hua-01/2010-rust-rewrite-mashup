@@ -320,6 +320,26 @@ impl HandcraftedScene {
         }
         self.revision = self.revision.wrapping_add(1);
     }
+    /// Sets a block as the authority (a multiplayer host) decided it. Unlike
+    /// `set`, a clear is recorded even where no generated chunk is loaded
+    /// yet, so the air still stands when that chunk arrives.
+    pub fn set_authoritative(&mut self, pos: BlockPos, block: Option<Block>) {
+        let chunk = (pos.0.div_euclid(16), pos.2.div_euclid(16));
+        match block {
+            Some(block) => self.set(pos, Some(block)),
+            None => {
+                if let Some(blocks) = self.blocks.get_mut(&chunk) {
+                    Arc::make_mut(blocks).remove(&pos);
+                    if blocks.is_empty() {
+                        self.blocks.remove(&chunk);
+                    }
+                }
+                Arc::make_mut(self.cleared.entry(chunk).or_default()).insert(pos);
+                self.revision = self.revision.wrapping_add(1);
+            }
+        }
+    }
+
     /// A block's sound type from the catalog (none for an authored scene or
     /// an older catalog).
     pub fn sound_type(&self, block: &Block) -> Option<minecraftoss_core::block::SoundType> {

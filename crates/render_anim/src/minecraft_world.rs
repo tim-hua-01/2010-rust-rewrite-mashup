@@ -132,6 +132,10 @@ struct Runtime {
     chunks_waiting: Vec<Vec<u8>>,
     /// On the host: the next arena chunk to encode for clients.
     terrain_next: usize,
+    /// On a client: the host's edits waiting to be applied (first sequence,
+    /// edits), and the next live sequence expected.
+    edits_waiting: Vec<(u32, Vec<frame::McEdit>)>,
+    next_edit: (u32, u32),
     /// The heart sprites (`hearts_image`), once the world's packs are in.
     hearts: Option<Handle<Image>>,
     world: Option<Loaded>,
@@ -235,6 +239,7 @@ pub(crate) fn register(app: &mut App) {
         .init_resource::<frame::MinecraftUi>()
         .init_resource::<frame::McKeyInput>()
         .init_resource::<frame::McTerrainSource>()
+        .init_resource::<frame::McEditLog>()
         .add_message::<frame::McWorldCommand>()
         .add_message::<frame::McWorldReport>()
         .init_resource::<frame::InventoryPuppet>()
@@ -371,12 +376,14 @@ fn update(
         Option<Res<net::ClientPredictionState>>,
         Option<Res<net::MasterBridge>>,
     ),
-    (mut world_commands, mut reports, mut exec, mut chunk_parts, mut terrain): (
+    (mut world_commands, mut reports, mut exec, mut chunk_parts, mut terrain, mut edit_log, mut host_edits): (
         MessageReader<frame::McWorldCommand>,
         MessageWriter<frame::McWorldReport>,
         MessageWriter<frame::UiExecCommand>,
         MessageReader<frame::McChunkPart>,
         ResMut<frame::McTerrainSource>,
+        ResMut<frame::McEditLog>,
+        MessageReader<frame::McEditsReceived>,
     ),
 ) {
     for command in world_commands.read() {
@@ -500,6 +507,13 @@ fn update(
             runtime.chunks_waiting.push(bytes);
         }
     }
+    for received in host_edits.read() {
+        if runtime.next_edit.0 != received.generation {
+            runtime.next_edit = (received.generation, 1);
+            runtime.edits_waiting.clear();
+        }
+        runtime.edits_waiting.push((received.first_seq, received.edits.clone()));
+    }
     let held = &mut *runtime;
     if let Some(world) = held.world.as_mut() {
         for bytes in std::mem::take(&mut held.chunks_waiting) {
@@ -618,6 +632,8 @@ fn update(
                     terrain.generation = terrain.generation.wrapping_add(1);
                     terrain.order = order;
                     terrain.chunks.clear();
+                    edit_log.generation = terrain.generation;
+                    edit_log.edits.clear();
                     runtime.terrain_next = 0;
                 }
                 runtime.ready = false;
@@ -666,6 +682,8 @@ fn update(
         ready,
         spawn_check,
         terrain_next,
+        edits_waiting,
+        next_edit,
         ..
     } = &mut *runtime;
     let Some(world) = world.as_mut() else {
@@ -746,6 +764,24 @@ fn update(
                     last = Some((state, id));
                     ids[((y as usize * 16) + z) * 16 + x] = id;
                 }
+            }
+        }
+        // Edits stand over the chunk as generated (a client's host chunks are
+        // the generated ones; edits arrive on their own, maybe earlier).
+        let (placed, cleared) = world.scene.chunk_edits((chunk.pos.x, chunk.pos.z));
+        let index = |(x, y, z): (i32, i32, i32)| {
+            let ly = y - min_y;
+            (0..height).contains(&ly).then(|| ((ly as usize * 16 + (z & 15) as usize) * 16) + (x & 15) as usize)
+        };
+        for (pos, block) in placed.iter().flat_map(|placed| placed.iter()) {
+            if let Some(i) = index(*pos) {
+                let state = world.stream.states.state_of(block);
+                ids[i] = shape_for_state(state, &world.registries.blocks, shapes, shape_ids);
+            }
+        }
+        for pos in cleared.iter().flat_map(|cleared| cleared.iter()) {
+            if let Some(i) = index(*pos) {
+                ids[i] = 0;
             }
         }
         if let Some(entities) = entities.as_mut() {
@@ -840,6 +876,53 @@ fn update(
     let yaw_rad = ps.viewangles[1].to_radians();
     let mc_yaw = (-yaw_rad.cos()).atan2(-yaw_rad.sin()).to_degrees();
     let mut all_events = sim::voxel::take_events();
+    // Blocks the host changed this frame, logged for its clients.
+    let mut changed: Vec<(i32, i32, i32)> = Vec::new();
+    // A client applies its host's edits, in order.
+    if authority.is_none() {
+        let mut waiting = std::mem::take(edits_waiting);
+        waiting.sort_by_key(|(first, _)| *first);
+        for (first, edits) in waiting {
+            let live = first != 0;
+            if live && first != next_edit.1 {
+                diag::warn!(World, "Minecraft: host edit {first} arrived, {} expected", next_edit.1);
+            }
+            if live {
+                next_edit.1 = first + edits.len() as u32;
+            }
+            let mut positions = Vec::with_capacity(edits.len());
+            for ([x, y, z], state) in edits {
+                let pos = (x, y, z);
+                let old = minecraft_terrain::scene::Scene::block(&world.scene, pos).cloned();
+                let block = world.stream.states.block(minecraftoss_core::BlockStateId(state)).cloned();
+                if live
+                    && block.is_none()
+                    && let (Some(sounds), Some(kind)) = (sounds.as_mut(), old.as_ref().and_then(|b| world.scene.sound_type(b)))
+                {
+                    let centre = [f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5];
+                    let at = Vec3::from_array(sim::voxel::to_map(origin, centre));
+                    sounds.play(&world.packs, &kind.break_sound, Some(at), (kind.volume + 1.0) / 2.0, kind.pitch * 0.8);
+                }
+                let shape = shape_for_state(
+                    block.as_ref().and_then(|b| world.stream.states.state_of(b)),
+                    &world.registries.blocks,
+                    shapes,
+                    shape_ids,
+                );
+                world.scene.set_authoritative(pos, block);
+                sim::voxel::set_block_shape(x, y, z, shape);
+                positions.push(pos);
+            }
+            world.stream.record_edits(&world.scene, &positions);
+            world.stream.mark_edited(&world.scene, &positions);
+            diag::info!(
+                World,
+                "Minecraft: applied {} host edits ({})",
+                positions.len(),
+                if live { format!("from {first}") } else { "join state".to_owned() }
+            );
+        }
+    }
 
     // The hand, when no gun is selected: vanilla's left click mines by hand
     // (with the hand's break speed) or punches, its right click places the
@@ -961,6 +1044,7 @@ fn update(
                 &mut entities.inventory,
                 minecraftoss_player::GameMode::Survival,
             ) {
+                changed.push(pos);
                 // Not into the player's own box.
                 let [fx, fy, fz] = feet;
                 let inside = (fx - 0.3) < f64::from(pos.0 + 1)
@@ -1059,6 +1143,7 @@ fn update(
         },
         time.elapsed_secs_f64(),
     );
+    changed.extend(broken.iter().map(|(pos, ..)| *pos));
     if let Some(sounds) = sounds.as_mut() {
         for (pos, block, blast) in &broken {
             if *blast {
@@ -1174,6 +1259,19 @@ fn update(
                 positions.push(pos);
             }
             world.stream.mark_edited(&world.scene, &positions);
+            changed.extend(positions);
+        }
+        // The host logs each changed block's new state for its clients.
+        if authority.is_some() && edit_log.generation == terrain.generation && !changed.is_empty() {
+            let air = world.stream.states.state_of(&minecraft_terrain::scene::Block::new("minecraft:air"));
+            for pos in changed.drain(..) {
+                let state = minecraft_terrain::scene::Scene::block(&world.scene, pos)
+                    .and_then(|block| world.stream.states.state_of(block))
+                    .or(air);
+                if let Some(state) = state {
+                    edit_log.edits.push(([pos.0, pos.1, pos.2], state.0));
+                }
+            }
         }
         for (amount, from) in hits {
             sim::voxel::push_player_damage(local.0.0, amount, from.map(|b| sim::voxel::to_map(origin, b)));
@@ -1435,6 +1533,8 @@ fn stop(runtime: &mut Runtime, view: &mut MinecraftWorldView) {
     runtime.chunk_parts = Default::default();
     runtime.chunks_waiting.clear();
     runtime.terrain_next = 0;
+    runtime.edits_waiting.clear();
+    runtime.next_edit = (0, 0);
     if runtime.world.take().is_some() || runtime.loading.take().is_some() || view.active {
         sim::voxel::deactivate();
         view.active = false;
@@ -1612,4 +1712,30 @@ fn arena_radius(border: f64) -> i32 {
     } else {
         4
     }
+}
+
+/// The voxel shape id of a block state's collision, registering new shapes.
+fn shape_for_state(
+    state: Option<BlockStateId>,
+    blocks: &minecraftoss_core::block::BlockRegistry,
+    shapes: &mut HashMap<BlockStateId, u16>,
+    shape_ids: &mut HashMap<Vec<[u32; 6]>, u16>,
+) -> u16 {
+    let Some(state) = state else {
+        return 0;
+    };
+    *shapes.entry(state).or_insert_with(|| {
+        let boxes = blocks.collision_boxes(state);
+        if boxes.is_empty() {
+            return 0;
+        }
+        let key: Vec<[u32; 6]> = boxes.iter().map(|b| b.map(|v| (v as f32).to_bits())).collect();
+        if let Some(&id) = shape_ids.get(&key) {
+            return id;
+        }
+        let boxes32 = boxes.iter().map(|b| b.map(|v| v as f32)).collect();
+        let id = sim::voxel::add_shapes(vec![boxes32]).unwrap_or(0);
+        shape_ids.insert(key, id);
+        id
+    })
 }

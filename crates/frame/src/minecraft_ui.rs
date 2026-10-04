@@ -216,3 +216,25 @@ pub struct McChunkPart {
     pub parts: u16,
     pub data: std::sync::Arc<[u8]>,
 }
+
+/// A block the host changed: its position and new state (`BlockStateId`,
+/// the same on every peer with the same Minecraft files).
+pub type McEdit = ([i32; 3], u16);
+
+/// The host's Minecraft edit log: every block change in order, the first
+/// with sequence 1. Clients get a compacted copy on joining, then the rest.
+#[derive(Resource, Default, Clone)]
+pub struct McEditLog {
+    /// The world the edits belong to (`McTerrainSource::generation`).
+    pub generation: u64,
+    pub edits: Vec<McEdit>,
+}
+
+/// Edits from the host as a client receives them. `first_seq` 0 marks the
+/// compacted state a joining client starts from; live edits follow in order.
+#[derive(Message, Clone, Debug)]
+pub struct McEditsReceived {
+    pub generation: u32,
+    pub first_seq: u32,
+    pub edits: Vec<McEdit>,
+}

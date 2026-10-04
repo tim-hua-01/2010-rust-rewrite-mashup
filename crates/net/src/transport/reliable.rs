@@ -55,6 +55,14 @@ pub enum ReliableRow {
         verdict: ActionVerdict,
     },
 
+    /// Minecraft block edits from the host (`frame::McEditLog`): `first_seq`
+    /// 0 is compacted join state, else the first edit's sequence.
+    McEdits {
+        generation: u32,
+        first_seq: u32,
+        edits: Vec<frame::McEdit>,
+    },
+
     /// A piece of one Minecraft arena chunk (`frame::McTerrainSource`).
     McChunk {
         generation: u32,
@@ -71,6 +79,7 @@ impl ReliableRow {
     pub fn encoded_size_hint(&self) -> usize {
         match self {
             Self::McChunk { data, .. } => data.len() + 24,
+            Self::McEdits { edits, .. } => edits.len() * 14 + 16,
             Self::Failure(text) | Self::Scores(text) => text.len() + 8,
             _ => 256,
         }
@@ -177,6 +186,9 @@ impl ReliablePayload {
 const ROW_TAG_EVENT: u8 = 0;
 const ROW_TAG_OUTCOME: u8 = 1;
 const ROW_TAG_MC_CHUNK: u8 = 10;
+const ROW_TAG_MC_EDITS: u8 = 11;
+/// The most edits one `McEdits` row carries (14 bytes each).
+pub const MAX_MC_EDITS_PER_ROW: usize = 700;
 /// The most bytes one `McChunk` row carries.
 pub const MAX_MC_CHUNK_PART: usize = 10 * 1024;
 
@@ -228,6 +240,18 @@ pub fn encode_reliable_payload(
                 out.put_u8(ROW_TAG_EVENT);
                 encode_event(out, event);
             }
+            ReliableRow::McEdits { generation, first_seq, edits } => {
+                out.put_u8(ROW_TAG_MC_EDITS);
+                out.put_u32(*generation);
+                out.put_u32(*first_seq);
+                out.put_u16(edits.len() as u16);
+                for ([x, y, z], state) in edits {
+                    out.put_i32(*x);
+                    out.put_i32(*y);
+                    out.put_i32(*z);
+                    out.put_u16(*state);
+                }
+            }
             ReliableRow::McChunk { generation, pos, part, parts, data } => {
                 out.put_u8(ROW_TAG_MC_CHUNK);
                 out.put_u32(*generation);
@@ -259,6 +283,20 @@ pub fn decode_reliable_payload(input: &mut WireReader<'_>) -> Result<ReliablePay
         let seq = input.get_u16()?;
         let row = match input.get_u8()? {
             ROW_TAG_EVENT => ReliableRow::Event(decode_event(input)?),
+            ROW_TAG_MC_EDITS => {
+                let generation = input.get_u32()?;
+                let first_seq = input.get_u32()?;
+                let count = usize::from(input.get_u16()?);
+                if count > MAX_MC_EDITS_PER_ROW {
+                    return Err(WireError::Malformed("McEdits row too large"));
+                }
+                let mut edits = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let pos = [input.get_i32()?, input.get_i32()?, input.get_i32()?];
+                    edits.push((pos, input.get_u16()?));
+                }
+                ReliableRow::McEdits { generation, first_seq, edits }
+            }
             ROW_TAG_MC_CHUNK => {
                 let generation = input.get_u32()?;
                 let pos = [input.get_i32()?, input.get_i32()?];
