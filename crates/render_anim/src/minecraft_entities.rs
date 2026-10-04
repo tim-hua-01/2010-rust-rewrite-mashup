@@ -65,6 +65,11 @@ pub(crate) struct Entities {
     seed: i64,
     /// The match's difficulty (`parse_difficulty`).
     difficulty: Difficulty,
+    /// `LivingEntity.invulnerableTime` and `lastHurt`: after a hit the player
+    /// takes no more for ten ticks unless it is harder, and then only the
+    /// difference, so a slime touching them every tick hurts twice a second.
+    invulnerable_ticks: u8,
+    last_hurt: f32,
     /// Sounds the mob world made since the last take: event, block point,
     /// volume, pitch.
     pub(crate) sounds: Vec<(String, DVec3, f32, f32)>,
@@ -188,6 +193,8 @@ impl Entities {
             loot_sequences: HashMap::new(),
             seed,
             difficulty,
+            invulnerable_ticks: 0,
+            last_hurt: 0.0,
             sounds: Vec::new(),
             random: minecraftoss_player::rng::LegacyRandom::new((seed ^ 0x1735) as u64),
         }
@@ -499,15 +506,31 @@ impl Entities {
                     self.poof.spawn(feet, width, height);
                 }
             }
+            // Each output is one server tick.
+            self.invulnerable_ticks = self.invulnerable_ticks.saturating_sub(1);
             for hit in output.player_hits.into_iter().filter(|h| h.player_id == PLAYER) {
                 let from = match hit.kind {
                     PlayerHitKind::Melee { attacker, .. } => Some(attacker.to_array()),
                     _ => None,
                 };
                 let damage = scaled_damage(hit.damage, self.difficulty);
-                if damage > 0.0 {
-                    hits.push(((damage / HEALTH_SCALE).round() as i32, from));
+                if damage <= 0.0 {
+                    continue;
                 }
+                // `LivingEntity.hurtServer`'s cooldown.
+                let dealt = if self.invulnerable_ticks > 10 {
+                    if damage <= self.last_hurt {
+                        continue;
+                    }
+                    let extra = damage - self.last_hurt;
+                    self.last_hurt = damage;
+                    extra
+                } else {
+                    self.last_hurt = damage;
+                    self.invulnerable_ticks = 20;
+                    damage
+                };
+                hits.push(((dealt / HEALTH_SCALE).round() as i32, from));
             }
         }
         if ticked {
